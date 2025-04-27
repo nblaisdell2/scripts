@@ -252,6 +252,8 @@ gh repo create $projectName `
     --description $projectDesc `
     --public | Out-Null
 
+# Since we're not cloning a repo, we'll need to add the remote directly here
+# so that we can add the secrets in the next step
 $awsGitHubRepoURL = "https://github.com/nblaisdell2/${projectName}.git"
 git remote add origin $awsGitHubRepoURL
 
@@ -342,6 +344,8 @@ $instanceConfig = @{
     Memory          = "2 GB"
     InstanceRoleArn = "arn:aws:iam::387815262971:role/apprunner-secret-role"
 } | ConvertTo-Json -Depth 10 -Compress
+
+# Create a new AppRunner service for hosting our site
 $serviceName = "${projectName}-service"
 $serviceOutput = aws apprunner create-service `
     --service-name $serviceName `
@@ -693,7 +697,7 @@ $endpoint = $terraformOutput.out_db_endpoint.value
 #   value is returned in format: "{host}:{port}"
 $parts = $endpoint -split ":"
 $rdsHost = $parts[0]
-$rdsPort = $parts[1]
+# $rdsPort = $parts[1]
 $rdsUser = "postgres"
 
 # Run terraform destroy to remove the newly created instance, 
