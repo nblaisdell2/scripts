@@ -5,7 +5,7 @@ This is a repository of random scripts that are used for various purposes, so th
 ## Table of Contents
 
 - [Create API Project](#create-api-project)
-- [Create React Project](#create-react-project) _(coming soon)_
+- [Create React Project](#create-react-project)
 
 ### Create API Project
 
