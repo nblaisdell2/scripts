@@ -1,4 +1,4 @@
-# Usage: ./create-api-project <project-name> <project-desc> <database-name> <db-password> <db-init-path> <aws-account-id> <aws-region> <gh-actions-role-name>
+# Usage: ./create-site-project <project-name> <project-desc> <database-name> <db-password> <db-init-path> <aws-account-id> <aws-region> <gh-actions-role-name>
 
 param(
     [string]$projectName,
@@ -35,6 +35,8 @@ function Get-User-Input {
             }
         }
     }
+
+    return $var
 }
 
 # Function for waiting for an AWS resource to be provisioned before moving on
@@ -64,6 +66,8 @@ function Wait-ForAWSResource {
     }
 }
 
+# Function for generating a random string of characters, of varying lengths if needed
+# Used for naming variables/cloud resources with a unique value every time
 function New-Random-String {
     param(
         [int]$NumChars = 6
@@ -94,7 +98,7 @@ Set-Location -Path 'C:\Personal\GitHub'
 
 # Get User Input for the needed variables for the rest of the script
 # Allow for default values for _some_ variables
-Get-User-Input -var $projectName -label "Project name" 
+$projectName = Get-User-Input -var $projectName -label "Project name" 
 
 ## Remove folder before creating
 # if (Test-Path -Path $projectName -PathType Container) {
@@ -107,13 +111,13 @@ if (Test-Path -Path $projectName -PathType Container) {
     exit 1
 }
 
-Get-User-Input -var $projectDesc      -label "Project description" 
-Get-User-Input -var $dbName           -label "Database name" 
-Get-User-Input -var $dbPass           -label "Database password" 
-Get-User-Input -var $dbInitPath       -label "Database init script path" 
-Get-User-Input -var $awsAccountID     -label "AWS Account ID"            -defaultValue "387815262971"
-Get-User-Input -var $awsRegion        -label "AWS Region"                -defaultValue "us-east-1"
-Get-User-Input -var $awsGHActionRole  -label "GitHub Actions Role Name"  -defaultValue "github-actions-create-site-role"
+$projectDesc = Get-User-Input -var $projectDesc      -label "Project description" 
+$dbName = Get-User-Input -var $dbName           -label "Database name" 
+$dbPass = Get-User-Input -var $dbPass           -label "Database password" 
+$dbInitPath = Get-User-Input -var $dbInitPath       -label "Database init script path" 
+$awsAccountID = Get-User-Input -var $awsAccountID     -label "AWS Account ID"            -defaultValue "387815262971"
+$awsRegion = Get-User-Input -var $awsRegion        -label "AWS Region"                -defaultValue "us-east-1"
+$awsGHActionRole = Get-User-Input -var $awsGHActionRole  -label "GitHub Actions Role Name"  -defaultValue "github-actions-create-site-role"
 
 
 # At this point in the script, all the necessary information has been gathered
@@ -128,9 +132,109 @@ Write-Host "==================================="
 Write-Host "CREATING LOCAL REPOSITORY"
 Write-Host "==================================="
 
-# Create folder for local repo
-New-Item -ItemType Directory -Path $projectName | Out-Null
+# Create a new project using Create-T3-app, providing a best-practice NextJS application
+# https://create.t3.gg/
+#   This project template will be using TypeScript, Tailwind (for CSS/styling), AppRouter (new layouts for NextJS)
+#   and tRPC for end-to-end typescript support for APIs!
+npx create-t3-app@latest $projectName --CI --trpc --tailwind --appRouter --dbProvider postgres
 Write-Host " ✅  Folder '$projectName' created successfully."
+
+# Move into the local directory for the rest of the steps
+Write-Host " 📁  Moving into local project directory..."
+Set-Location -Path $projectName
+
+# Add the Dockerfile necessary for containerizing the application
+# Sourced from: https://create.t3.gg/en/deployment/docker#3-create-dockerfile
+@'
+##### DEPENDENCIES
+
+FROM --platform=linux/amd64 node:20-alpine AS deps
+RUN apk add --no-cache libc6-compat openssl
+WORKDIR /app
+
+# Install dependencies based on the preferred package manager
+
+COPY package.json yarn.lock* package-lock.json* pnpm-lock.yaml\* ./
+
+RUN \
+    if [ -f yarn.lock ]; then yarn --frozen-lockfile; \
+    elif [ -f package-lock.json ]; then npm ci; \
+    elif [ -f pnpm-lock.yaml ]; then npm install -g pnpm && pnpm i; \
+    else echo "Lockfile not found." && exit 1; \
+    fi
+
+##### BUILDER
+
+FROM --platform=linux/amd64 node:20-alpine AS builder
+ARG DATABASE_URL
+ARG NEXT_PUBLIC_CLIENTVAR
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# ENV NEXT_TELEMETRY_DISABLED 1
+
+RUN \
+    if [ -f yarn.lock ]; then SKIP_ENV_VALIDATION=1 yarn build; \
+    elif [ -f package-lock.json ]; then SKIP_ENV_VALIDATION=1 npm run build; \
+    elif [ -f pnpm-lock.yaml ]; then npm install -g pnpm && SKIP_ENV_VALIDATION=1 pnpm run build; \
+    else echo "Lockfile not found." && exit 1; \
+    fi
+
+##### RUNNER
+
+FROM --platform=linux/amd64 gcr.io/distroless/nodejs20-debian12 AS runner
+WORKDIR /app
+
+ENV NODE_ENV production
+
+# ENV NEXT_TELEMETRY_DISABLED 1
+
+COPY --from=builder /app/next.config.js ./
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/package.json ./package.json
+
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+
+EXPOSE 3000
+ENV PORT 3000
+
+CMD ["server.js"]
+'@ | Set-Content -Path "Dockerfile"
+
+# Add the .dockerignore necessary for containerizing the application
+# Sourced from: https://create.t3.gg/en/deployment/docker#2-create-dockerignore-file
+@'
+.env
+Dockerfile
+.dockerignore
+node_modules
+npm-debug.log
+README.md
+.next
+.git
+'@ | Set-Content -Path ".dockerignore"
+
+# Add the "standalone" property to the NextJS configuration for the application,
+# necessary for the Dockerfile, created above
+Remove-Item "next.config.js"
+@'
+/**
+ * Run `build` or `dev` with `SKIP_ENV_VALIDATION` to skip env validation. This is especially useful
+ * for Docker builds.
+ */
+import "./src/env.js";
+
+/** @type {import("next").NextConfig} */
+const config = {
+  reactStrictMode: true,
+  transpilePackages: ["geist"],
+  output: "standalone",
+};
+
+export default config;
+'@ | Set-Content -Path "next.config.js"
 
 
 
@@ -146,13 +250,10 @@ Write-Host "==================================="
 Write-Host " 🆕  Creating GitHub Repo..."
 gh repo create $projectName `
     --description $projectDesc `
-    --template nblaisdell2/fastify-postgres-typescript-template `
-    --public `
-    --clone | Out-Null
+    --public | Out-Null
 
-# Move into the local directory for the rest of the steps
-Write-Host " 📁  Moving into local project directory..."
-Set-Location -Path $projectName
+$awsGitHubRepoURL = "https://github.com/nblaisdell2/${projectName}.git"
+git remote add origin $awsGitHubRepoURL
 
 # Add necessary secrets for accessing CodeBuild via GitHub Actions
 Write-Host " 🔐  Setting GitHub Secrets..."
@@ -199,38 +300,65 @@ docker push "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:l
 
 
 Write-Host "-----------------------------------"
-Write-Host "     CREATING LAMBDA FUNCTION      "
+Write-Host "     CREATING SECRETS MANAGER      "
 Write-Host "-----------------------------------"
 
-# Create a Lambda function as the backend for this API (sourced by our ECR/Docker image)
-Write-Host " 🆕  Creating Lambda..."
-$awsLambdaExecRoleArn = "arn:aws:iam::${awsAccountID}:role/service-role/GetStartedLambdaBasicExecutionRole"
-aws lambda create-function `
-    --function-name $projectName `
-    --package-type Image `
-    --code ImageUri="${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:latest" `
-    --role $awsLambdaExecRoleArn | Out-Null
+# Create a secrets repository within Secrets Manager to house our environment variables
+# for the project, rather than storing them in plaintext on the Lambda itself
+Write-Host " 🆕  Creating new secret in Secrets Manager..."
+$secretID = "${projectName}/secrets-$(New-Random-String)"
+$secretARN = aws secretsmanager create-secret `
+    --name $secretID `
+    --description "Environment variables for ${projectName}" `
+    --secret-string '0.0.0.0' | ConvertFrom-Json | Select-Object -ExpandProperty Arn
 
-# Check to see if the Lambda has been provisioned before moving on
-Write-Host " ⏳  Waiting for lambda '${projectName}' to become available..."
-Wait-ForAWSResource -ResourceName $projectName -Command {
-    $lambdaState = aws lambda get-function --function-name $projectName | ConvertFrom-Json | Select-Object -ExpandProperty Configuration | Select-Object -ExpandProperty State
-    if ($lambdaState -eq "Pending") {
-        cmd /c exit 20
-    }
+# Wait until the secret is available
+Write-Host " ⏳  Waiting for secret '$secretID' to become available..."
+Wait-ForAWSResource -ResourceName $secretID -Command {
+    aws secretsmanager describe-secret --secret-id $secretID 2>$null | Out-Null
 }
 
-# Publish an initial version of the lambda to point to the ECR image 
-Write-Host " 🆕  Publishing new Lambda version..."
-$initVersion = aws lambda publish-version --function-name $projectName --description "Initial Version" | ConvertFrom-Json | Select-Object -ExpandProperty Version
 
-# Create a Lambda alias to match the tag given to the ECR image
-Write-Host " 🆕  Creating new Lambda alias..."
-aws lambda create-alias `
-    --function-name $projectName `
-    --name "latest" `
-    --function-version $initVersion `
-    --description "Latest version" | Out-Null
+Write-Host "-----------------------------------"
+Write-Host "    CREATING APPRUNNER SERVICE     "
+Write-Host "-----------------------------------"
+
+$sourceConfig = @{
+    ImageRepository             = @{
+        ImageIdentifier     = "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:latest"
+        ImageConfiguration  = @{
+            Port                      = "3000"
+            RuntimeEnvironmentSecrets = @{"HOSTNAME" = $secretARN }
+        }
+        ImageRepositoryType = "ECR"
+    }
+    AutoDeploymentsEnabled      = $false
+    AuthenticationConfiguration = @{
+        AccessRoleArn = "arn:aws:iam::387815262971:role/service-role/AppRunnerECRAccessRole123"
+    }
+} | ConvertTo-Json -Depth 10 -Compress
+$instanceConfig = @{
+    Cpu             = "1 vCPU"
+    Memory          = "2 GB"
+    InstanceRoleArn = "arn:aws:iam::387815262971:role/apprunner-secret-role"
+} | ConvertTo-Json -Depth 10 -Compress
+$serviceName = "${projectName}-service"
+$serviceOutput = aws apprunner create-service `
+    --service-name $serviceName `
+    --source-configuration $sourceConfig `
+    --instance-configuration $instanceConfig `
+    --query '{OperationId: OperationId, ServiceUrl: Service.ServiceUrl, ServiceArn: Service.ServiceArn}' | ConvertFrom-Json
+
+$serviceARN = $serviceOutput.ServiceArn
+$serviceURL = $serviceOutput.ServiceUrl
+
+# $serviceOpId = $serviceOutput.OperationId
+# Wait-ForAWSResource -ResourceName $serviceName -DelaySeconds 60 -Command {
+#     $serviceStatus = aws apprunner list-operations --service-arn $serviceARN | ConvertFrom-Json | Select-Object -ExpandProperty OperationSummaryList | Where-Object { $_.Id -eq $serviceOpId } | Select-Object -ExpandProperty Status
+#     if ($serviceStatus -ne "SUCCEEDED") {
+#         cmd /c exit 20
+#     }
+# }
 
 
 Write-Host "-----------------------------------"
@@ -265,7 +393,7 @@ $awsCodeBuildPolicy = @{
                 "codebuild:*"
                 "ecr:*"
                 "logs:*"
-                "lambda:*"
+                "apprunner:*"
             )
             Resource = "*"
         }
@@ -292,7 +420,6 @@ Start-Sleep -Seconds 10
 
 # Define the source for a CodeBuild project, which will point to our newly created
 # GitHub repo to integrate CodeBuild with our GitHub Actions script
-$awsGitHubRepoURL = "https://github.com/nblaisdell2/${projectName}.git"
 $source = @{
     type              = "GITHUB"
     location          = $awsGitHubRepoURL
@@ -317,6 +444,7 @@ $environment = @{
         @{ name = "awsRegion"; value = $awsRegion; type = "PLAINTEXT" }
         @{ name = "awsAccountID"; value = $awsAccountID; type = "PLAINTEXT" }
         @{ name = "dockerContainerName"; value = $projectName; type = "PLAINTEXT" }
+        @{ name = "serviceARN"; value = $serviceARN; type = "PLAINTEXT" }
     )
 } | ConvertTo-Json -Depth 10 -Compress
 
@@ -347,6 +475,19 @@ $awsCodeDeployAssumeRolePolicyDocument = @{
     )
 } | ConvertTo-Json -Depth 3
 
+$awsCodeDeployAppRunnerPolicyDocument = @{
+    Version   = "2012-10-17"
+    Statement = @(
+        @{
+            Effect   = "Allow"
+            Action   = @(
+                "apprunner:StartDeployment"
+            )
+            Resource = "${serviceARN}"
+        }
+    )
+} | ConvertTo-Json -Depth 10 -Compress
+
 # Create the CodeDeploy role using the assume role policy above and Extract the role ARN
 $awsCodeDeployRoleName = "codedeploy-${projectName}-role"
 Write-Host " 🆕  Creating CodeDeploy role..."
@@ -359,9 +500,12 @@ $awsCodeDeployRoleArn = aws iam create-role `
 aws iam attach-role-policy `
     --role-name $awsCodeDeployRoleName `
     --policy-arn "arn:aws:iam::aws:policy/AmazonElasticContainerRegistryPublicFullAccess" | Out-Null
-aws iam attach-role-policy `
+
+# Use the role ARN we just obtained to attach the other policy defined above
+aws iam put-role-policy `
     --role-name $awsCodeDeployRoleName `
-    --policy-arn "arn:aws:iam::aws:policy/service-role/AWSCodeDeployRoleForLambda" | Out-Null
+    --policy-name "codedeploy-${projectName}-apprunner-policy" `
+    --policy-document $awsCodeDeployAppRunnerPolicyDocument | Out-Null
 
 # Wait 10 seconds for the role to be propogated across services
 Write-Host " 😴  Sleeping for 10 seconds..."
@@ -384,145 +528,6 @@ aws deploy create-deployment-group `
     --deployment-group-name "${projectName}-deploy-group" `
     --service-role-arn $awsCodeDeployRoleArn `
     --deployment-style $awsCodeBuildDeployStyle | Out-Null
-
-
-Write-Host "-----------------------------------"
-Write-Host "       CREATING API GATEWAY        "
-Write-Host "-----------------------------------"
-
-# Create an API for this project within API Gateway
-Write-Host " 🆕  Creating REST API..."
-$restApiID = (aws apigateway create-rest-api `
-        --name $projectName `
-        --description "$projectDesc" `
-        --endpoint-configuration '{ "types": ["REGIONAL"] }' | ConvertFrom-Json).id
-
-# Create two "ANY" (HTTP verb) resources for our API, the combination of which 
-# will handle *all* requests coming into our API
-#    ANY /         - base URL of API
-#    ANY /{proxy+} - placeholder for _any_ URL of our API (handles *all* other requests)
-Write-Host " 🆕  Creating REST API Resources..."
-$resource1ID = (aws apigateway get-resources --rest-api-id $restApiID | ConvertFrom-Json).items[0].id
-$resource2ID = (aws apigateway create-resource --rest-api-id $restApiID --parent-id $resource1ID --path-part "{proxy+}" | ConvertFrom-Json).id
-
-# Create the ANY method for both resources
-Write-Host " 🆕  Creating REST API Methods..."
-aws apigateway put-method `
-    --rest-api-id $restApiID `
-    --resource-id $resource1ID `
-    --http-method "ANY" `
-    --authorization-type "NONE" `
-    --request-parameters '{}' | Out-Null
-aws apigateway put-method `
-    --rest-api-id $restApiID `
-    --resource-id $resource2ID `
-    --http-method "ANY" `
-    --authorization-type "NONE" `
-    --request-parameters '{}' | Out-Null
-
-# Create Lambda integration for Resource 1
-Write-Host " 🆕  Creating Resource/Method Integration for 'ANY /'..."
-aws apigateway put-integration `
-    --region $awsRegion `
-    --rest-api-id $restApiID `
-    --resource-id $resource1ID `
-    --http-method "ANY" `
-    --type "AWS_PROXY" `
-    --content-handling "CONVERT_TO_TEXT" `
-    --integration-http-method "POST" `
-    --uri "arn:aws:apigateway:${awsRegion}:lambda:path/2015-03-31/functions/arn:aws:lambda:${awsRegion}:${awsAccountID}:function:${projectName}/invocations" | Out-Null
-aws apigateway put-integration-response `
-    --rest-api-id $restApiID `
-    --resource-id $resource1ID `
-    --http-method "ANY" `
-    --status-code 200 `
-    --response-templates '{}' | Out-Null
-aws apigateway put-method-response `
-    --rest-api-id $restApiID `
-    --resource-id $resource1ID `
-    --http-method "ANY" `
-    --status-code 200 `
-    --response-models '{"application/json": "Empty"}' | Out-Null
-
-# Create Lambda integration for Resource 2
-Write-Host " 🆕  Creating Resource/Method Integration for 'ANY /{proxy+}'..."
-aws apigateway put-integration `
-    --region $awsRegion `
-    --rest-api-id $restApiID `
-    --resource-id $resource2ID `
-    --http-method "ANY" `
-    --type "AWS_PROXY" `
-    --content-handling "CONVERT_TO_TEXT" `
-    --integration-http-method "POST" `
-    --uri "arn:aws:apigateway:${awsRegion}:lambda:path/2015-03-31/functions/arn:aws:lambda:${awsRegion}:${awsAccountID}:function:${projectName}/invocations" | Out-Null
-aws apigateway put-integration-response `
-    --rest-api-id $restApiID `
-    --resource-id $resource2ID `
-    --http-method "ANY" `
-    --status-code 200 `
-    --response-templates '{}' | Out-Null
-aws apigateway put-method-response `
-    --rest-api-id $restApiID `
-    --resource-id $resource2ID `
-    --http-method "ANY" `
-    --status-code 200 `
-    --response-models '{"application/json": "Empty"}' | Out-Null
-
-# Create a deployment for our API
-Write-Host " 🆕  Creating API Gateway deployment..."
-aws apigateway create-deployment `
-    --rest-api-id $restApiID `
-    --stage-name "dev" | Out-Null
-
-# Add permissions to our Lambda function (created earlier) to allow for our
-# new API to be able to call our Lambda function via the Lambda integration
-#    (one for each resource)
-Write-Host " ➕  Adding API Gateway permissions to Lambda..."
-aws lambda add-permission `
-    --function-name $projectName `
-    --statement-id "stmt_invoke_1" `
-    --action "lambda:InvokeFunction" `
-    --principal "apigateway.amazonaws.com" `
-    --source-arn "arn:aws:execute-api:${awsRegion}:${awsAccountID}:${restApiID}/*/*/" | Out-Null
-aws lambda add-permission `
-    --function-name $projectName `
-    --statement-id "stmt_invoke_2" `
-    --action "lambda:InvokeFunction" `
-    --principal "apigateway.amazonaws.com" `
-    --source-arn "arn:aws:execute-api:${awsRegion}:${awsAccountID}:${restApiID}/*/*/*" | Out-Null
-
-
-Write-Host "-----------------------------------"
-Write-Host "     CREATING SECRETS MANAGER      "
-Write-Host "-----------------------------------"
-
-# Create a secrets repository within Secrets Manager to house our environment variables
-# for the project, rather than storing them in plaintext on the Lambda itself
-Write-Host " 🆕  Creating new secret in Secrets Manager..."
-$secretID = "${projectName}/secrets-$(New-Random-String)"
-aws secretsmanager create-secret `
-    --name $secretID `
-    --description "Environment variables for ${projectName}" `
-    --secret-string '{}' | Out-Null
-
-# Wait until the secret is available
-Write-Host " ⏳  Waiting for secret '$secretID' to become available..."
-Wait-ForAWSResource -ResourceName $secretID -Command {
-    aws secretsmanager describe-secret --secret-id $secretID 2>$null | Out-Null
-}
-
-# Create an object whose only key is the name of our Secret key we just created
-$envVars = @{
-    SECRET_ID = $SecretID
-} | ConvertTo-Json -Compress
-
-# Update the Lambda function to include this single environment variable, so that
-# it has access to Secrets Manager at runtime
-Write-Host " 🚀  Updating Lambda Configuration (timeout + env vars)..."
-aws lambda update-function-configuration `
-    --function-name $projectName `
-    --timeout 900 `
-    --environment "{ `"Variables`": $envVars }" | Out-Null
 
 
 
@@ -751,176 +756,103 @@ Write-Host "==================================="
 Write-Host " 📁  Moving back to project root directory..."
 Set-Location ..
 
-# Install npm dependencies for the project
-Write-Host " 💻  Installing NPM dependencies..." | Out-Null
-npm install
-
-# Create LOCAL .env file (connects to local PostgreSQL instance, for development/testing)
-Write-Host " 🆕  Creating .env file..."
-@"
-# Port for the Fastify API to run on
-SERVER_PORT="3000"
-
-## AWS Secrets Manager secret ID (for environment variables)
-#SECRET_ID="$secretID"
-
-# PostgreSQL database connection details
-DB_HOST="localhost"
-DB_DATABASE="$dbName"
-DB_PORT="5432"
-DB_USER="$rdsUser"
-DB_PASS="Super!345Q"
-"@ | Set-Content -Path ".env"
-
-# Create PROD .env file (connects to RDS PostgreSQL instance, for production)
-Write-Host " 🆕  Creating .env.prod file..."
-@"
-# Port for the Fastify API to run on
-SERVER_PORT="3000"
-
-# AWS Secrets Manager secret ID (for environment variables)
-SECRET_ID="$secretID"
-
-# PostgreSQL database connection details
-DB_HOST="$rdsHost"
-DB_DATABASE="$dbName"
-DB_PORT="$rdsPort"
-DB_USER="$rdsUser"
-DB_PASS="$dbPass"
-"@ | Set-Content -Path ".env.prod"
-
-# Create 'update-secrets.sh' file
-Write-Host " 🆕  Creating update-secrets.sh file..."
-$hereStringSecret = @'
-set -e
-
-SECRET_ID="{{MY_SECRET}}"
-ENV_FILE="${1:-.env}"  # Default to .env in current dir
-
-if [[ ! -f "$ENV_FILE" ]]; then
-  echo "❌ .env file not found at: $ENV_FILE"
-  exit 1
-fi
-
-# Fetch existing secret value
-echo "🔍 Fetching current secrets from AWS Secrets Manager..."
-CURRENT_SECRET=$(aws secretsmanager get-secret-value --secret-id "$SECRET_ID" --query SecretString --output text 2>/dev/null || echo "{}")
-
-# Use jq to parse existing secret JSON
-TMP_FILE=$(mktemp)
-echo "$CURRENT_SECRET" | jq '.' > "$TMP_FILE"
-
-# Read each line in the .env file
-echo "📦 Reading from .env file..."
-while IFS='=' read -r key value; do
-  # Skip comments and empty lines
-  [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
-
-  # Trim whitespace
-  key=$(echo "$key" | xargs)
-  value=$(echo "$value" | xargs)
-
-  [[ "$key" = "" ]] && continue
-  [[ "$value" = "" ]] && continue
-
-  # Check if key exists in the current secret
-  if jq -e --arg k "$key" '.[$k]' "$TMP_FILE" > /dev/null; then
-    : # echo "🟡 Key '$key' already exists, skipping..."
-  else
-    echo "➕ Adding new key '$key'"
-    jq --arg k "$key" --arg v "$value" '. + {($k): $v}' "$TMP_FILE" > "${TMP_FILE}.tmp" && mv "${TMP_FILE}.tmp" "$TMP_FILE"
-  fi
-done < "$ENV_FILE"
-
-# Update secret in AWS
-echo "🚀 Updating secret in AWS Secrets Manager..."
-aws secretsmanager update-secret --secret-id "$SECRET_ID" --secret-string "$(cat "$TMP_FILE")" >> /dev/null
-
-# Clean up
-rm "$TMP_FILE"
-
-echo "✅ Secret updated successfully."
-'@ 
-$hereStringSecret = $hereStringSecret.Replace("{{MY_SECRET}}", $secretID)
-$hereStringSecret | Set-Content -Path "update-secrets.sh"
-
-# Create empty README file for the project
-Write-Host " 🆕  Creating README file..."
-@"
-# $projectName
-
-"@ | Set-Content -Path "README.md"
-
-
-
-#==========================
-# 8. UPDATE SECRETS MANAGER
-#==========================
-Write-Host "==================================="
-Write-Host "UPDATE SECRETS MANAGER"
-Write-Host "==================================="
-
-$envFile = ".env.prod"  # Default to .env.prod in current dir
-$currentSecret = "{}"
-
-Write-Host " 🔐  Adding environment variables from ${envFile} to AWS Secrets Manager..."
-
-# Add the default environment variables to Secrets Manager
-
-
-# Parse existing secret JSON
-$tmpFile = [System.IO.Path]::GetTempFileName()
-Set-Content -Path $tmpFile -Value ($currentSecret | ConvertFrom-Json | ConvertTo-Json -Depth 100)
-
-Write-Host " 📦  Reading from ${envFile} file..."
-
-# Read each line from the .env file
-Get-Content $envFile | ForEach-Object {
-    $line = $_.Trim()
-
-    # Skip comments and empty lines
-    if ($line -match '^\s*#' -or [string]::IsNullOrWhiteSpace($line)) {
-        return
-    }
-
-    # Split each env variable by the '=' sign, to separate the key and value
-    $parts = $line -split '=', 2
-    if ($parts.Count -ne 2) { return }
-
-    # Extract the key & value
-    $key = $parts[0].Trim()
-    $value = $parts[1].Trim().Trim('"')  # Remove surrounding quotes if present
-
-    # If either key/value is empty, skip
-    if (-not $key -or -not $value) { return }
-
-    $existing = Get-Content $tmpFile | ConvertFrom-Json
-    if ($existing.PSObject.Properties.Name -contains $key) {
-        # Key already exists, skip
-        return
-    }
-
-    Write-Host " ➕  Adding new key '$key'"
-    $existing | Add-Member -NotePropertyName $key -NotePropertyValue $value -Force
-    $existing | ConvertTo-Json -Depth 100 | Set-Content -Path $tmpFile
+# Add GitHub Actions workflow file
+# Ensure the folder structure exists
+$folderPath = ".github/workflows"
+if (-not (Test-Path $folderPath)) {
+    New-Item -ItemType Directory -Path $folderPath -Force | Out-Null
 }
 
-# Update the secret in AWS
-Write-Host " 🚀  Updating secret in AWS Secrets Manager..."
-$updatedSecret = Get-Content $tmpFile -Raw
-aws secretsmanager update-secret `
-    --secret-id $secretID `
-    --secret-string "$updatedSecret" | Out-Null
+@'
+# This workflow will do a clean installation of node dependencies, cache/restore them, build the source code and run tests across different versions of node
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-nodejs
 
-# Clean up
-Remove-Item $tmpFile
+name: Node.js CI
 
-Write-Host " ✅  Secret updated successfully."
+# Needed to work with AWS Credentials & AWS CodeBuild
+permissions:
+  id-token: write
+  contents: read
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build:
+    # 👇 Skip build if commit message contains [skip ci]
+    if: ${{ github.event.head_commit.message != 'Initial commit' }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [20.x]
+        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
+
+    steps:
+      - name: Checking out source code
+        uses: actions/checkout@v3
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: "npm"
+      - name: Install Dependencies
+        run: npm ci
+      - name: Build the Application
+        run: npm run build --if-present
+      # - name: Test the Application
+      #   run: npm test
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_GHACTIONS_ROLENAME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Running AWS CodeBuild
+        uses: aws-actions/aws-codebuild-run-build@v1.0.12
+        with:
+          project-name: ${{ github.event.repository.name }}
+'@ | Set-Content -Path "$folderPath/build.yml"
+
+# Add buildspec.yml file
+@'
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo "Logging in to Amazon ECR..."
+      - aws ecr get-login-password --region $awsRegion | docker login --username AWS --password-stdin $awsAccountID.dkr.ecr.$awsRegion.amazonaws.com
+  build:
+    commands:
+      - echo "Building the Docker image..."
+      - docker build -t $dockerContainerName:latest .
+      - docker tag $dockerContainerName:latest $awsAccountID.dkr.ecr.$awsRegion.amazonaws.com/$dockerContainerName:latest
+  post_build:
+    commands:
+      - echo "Pushing container to ECR..."
+      - docker push $awsAccountID.dkr.ecr.$awsRegion.amazonaws.com/$dockerContainerName:latest
+      - aws apprunner start-deployment --service-arn $serviceARN
+'@ | Set-Content -Path "buildspec.yml"
+
+# Update .gitignore/.dockerignore files to include "/.terraform" folder
+@'
+
+# Terraform
+.terraform/
+'@ | Add-Content -Path ".gitignore"
+@'
+
+# Terraform
+.terraform/
+'@ | Add-Content -Path ".dockerignore"
 
 
 
 #==========================
-# 9. PUSH REPO TO GITHUB
+# 8. PUSH REPO TO GITHUB
 #==========================
 Write-Host "==================================="
 Write-Host "PUSING CODE TO GITHUB"
@@ -929,13 +861,13 @@ Write-Host "==================================="
 # Push the code to GitHub, triggering a GitHub actions build
 Write-Host " 🚀  Pushing code to GitHub..."
 git add . | Out-Null
-git commit -m "initial project setup" | Out-Null
+git commit -m "Initial commit" | Out-Null
 git push -u origin main | Out-Null
 
 
 
 #==========================
-# 10. OUTPUTS
+# 9. OUTPUTS
 #==========================
 Write-Host "==================================="
 Write-Host "OUTPUTS"
@@ -945,7 +877,7 @@ Write-Host "==================================="
 Write-Host ""
 Write-Host "New Project Name : ${projectName}"
 Write-Host "GitHub Repo URL  : https://github.com/nblaisdell2/${projectName}"
-Write-Host "API Gateway URL  : https://${restApiID}.execute-api.${awsRegion}.amazonaws.com/dev"
+Write-Host "Site URL         : ${serviceURL}"
 Write-Host "Database Endpoint: ${rdsHost}"
 
 # Wait for the user to enter any key at this point
@@ -956,7 +888,7 @@ $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") | Out-Null
 
 
 #==========================
-# 11. OPEN PROJECT
+# 10. OPEN PROJECT
 #==========================
 # Lastly, open the current directory (the project directory) in VS Code to start developing!
 code .

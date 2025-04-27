@@ -19,7 +19,7 @@ For more details, see [Create New API Project script](https://nblaisdell.atlassi
 ## Usage
 
 ```ps1
-# Usage: ./create-project <project-name> <project-desc> <database-name> <db-password> <aws-account-id> <aws-region> <gh-actions-role-name>
+# Usage: ./create-api-project <project-name> <project-desc> <database-name> <db-password> <db-init-path> <aws-account-id> <aws-region> <gh-actions-role-name>
 
 # Use interactively, enter all variables at runtime
 .\create-api-project.ps1
