@@ -1,85 +1,85 @@
 # Usage: ./create-site-project <project-name> <project-desc> <database-name> <db-password> <db-init-path> <aws-account-id> <aws-region> <gh-actions-role-name>
 
 param(
-    [string]$projectName,
-    [string]$projectDesc,
-    [string]$dbName,
-    [string]$dbPass,
-    [string]$dbInitPath,
-    [string]$awsAccountID,
-    [string]$awsRegion,
-    [string]$awsGHActionRole
+  [string]$projectName,
+  [string]$projectDesc,
+  [string]$dbName,
+  [string]$dbPass,
+  [string]$dbInitPath,
+  [string]$awsAccountID,
+  [string]$awsRegion,
+  [string]$awsGHActionRole
 )
 
 # Function for accepting user input for the script
 # disallows blank values - value must be entered
 function Get-User-Input {
-    param(
-        [string]$var,
-        [string]$label,
-        [string]$defaultValue
-    )
+  param(
+    [string]$var,
+    [string]$label,
+    [string]$defaultValue
+  )
 
-    $msg = "  Enter ${label}"
-    if (-not $var) {
-        if ($defaultValue) {            
-            $userInput = Read-Host "${msg} (default: ${defaultValue})"
-            $var = if ([string]::IsNullOrWhiteSpace($userInput)) { $defaultValue } else { $userInput }
-        }
-        else {
-            $var = Read-Host $msg
-    
-            while ([string]::IsNullOrWhiteSpace($var)) {
-                Write-Host " ⚠️  $label is required!"
-                $var = Read-Host $msg
-            }
-        }
+  $msg = "  Enter ${label}"
+  if (-not $var) {
+    if ($defaultValue) {            
+      $userInput = Read-Host "${msg} (default: ${defaultValue})"
+      $var = if ([string]::IsNullOrWhiteSpace($userInput)) { $defaultValue } else { $userInput }
     }
+    else {
+      $var = Read-Host $msg
+    
+      while ([string]::IsNullOrWhiteSpace($var)) {
+        Write-Host " ⚠️  $label is required!"
+        $var = Read-Host $msg
+      }
+    }
+  }
 
-    return $var
+  return $var
 }
 
 # Function for waiting for an AWS resource to be provisioned before moving on
 function Wait-ForAWSResource {
-    param(
-        [string]$ResourceName,
-        [ScriptBlock]$Command,
-        [int]$DelaySeconds = 5
-    )
+  param(
+    [string]$ResourceName,
+    [ScriptBlock]$Command,
+    [int]$DelaySeconds = 5
+  )
 
-    while ($true) {
-        try {
-            & $Command | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host " ✅  Resource '${ResourceName}' is now available!"
-                break
-            }
-        }
-        catch {
-            # Optional: log or handle error
-            Write-Host " ❌  Error finding resource ${ResourceName}!"
-            exit 1
-        }
-    
-        Write-Host " ⏳  Waiting for resource '${ResourceName}' to be ready..."
-        Start-Sleep -Seconds $DelaySeconds
+  while ($true) {
+    try {
+      & $Command | Out-Null
+      if ($LASTEXITCODE -eq 0) {
+        Write-Host " ✅  Resource '${ResourceName}' is now available!"
+        break
+      }
     }
+    catch {
+      # Optional: log or handle error
+      Write-Host " ❌  Error finding resource ${ResourceName}!"
+      exit 1
+    }
+    
+    Write-Host " ⏳  Waiting for resource '${ResourceName}' to be ready..."
+    Start-Sleep -Seconds $DelaySeconds
+  }
 }
 
 # Function for generating a random string of characters, of varying lengths if needed
 # Used for naming variables/cloud resources with a unique value every time
 function New-Random-String {
-    param(
-        [int]$NumChars = 6
-    )
+  param(
+    [int]$NumChars = 6
+  )
 
-    # Define possible characters
-    $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+  # Define possible characters
+  $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
 
-    # Build a 6-character random string
-    $randomString = -join ((1..6) | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+  # Build a 6-character random string
+  $randomString = -join ((1..6) | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
 
-    return $randomString
+  return $randomString
 }
 
 ###################################################################################################
@@ -107,8 +107,8 @@ $projectName = Get-User-Input -var $projectName -label "Project name"
 
 # If it does, exit here and allow the user to try again with another project name
 if (Test-Path -Path $projectName -PathType Container) {
-    Write-Host " ⚠️  Error: A folder named '$projectName' already exists. Please choose a different name."
-    exit 1
+  Write-Host " ⚠️  Error: A folder named '$projectName' already exists. Please choose a different name."
+  exit 1
 }
 
 $projectDesc = Get-User-Input -var $projectDesc      -label "Project description" 
@@ -194,6 +194,10 @@ COPY --from=builder /app/next.config.js ./
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/package.json ./package.json
 
+# Copying node_modules folder, so we have access to @aws-sdk/client-secrets-manager
+# during build/runtime
+COPY --from=builder /app/node_modules ./node_modules
+
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 
@@ -249,8 +253,8 @@ Write-Host "==================================="
 # and clone the new repo into the local repo folder we just created
 Write-Host " 🆕  Creating GitHub Repo..."
 gh repo create $projectName `
-    --description $projectDesc `
-    --public | Out-Null
+  --description $projectDesc `
+  --public | Out-Null
 
 # Since we're not cloning a repo, we'll need to add the remote directly here
 # so that we can add the secrets in the next step
@@ -266,277 +270,7 @@ gh secret set AWS_GHACTIONS_ROLENAME -b $awsGHActionRole | Out-Null
 
 
 #==========================
-# 4. CREATE AWS INFRA
-#==========================
-Write-Host "==================================="
-Write-Host "CREATING AWS INFRASTRUCTURE"
-Write-Host "==================================="
-Write-Host "-----------------------------------"
-Write-Host "      CONNECTING TO AWS ECR        "
-Write-Host "-----------------------------------"
-
-# login to ECR for Docker
-Write-Host " 🔑  Logging into ECR..."
-aws ecr get-login-password --region $awsRegion | docker login --username "AWS" --password-stdin "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com" | Out-Null
-
-# Create a new repository within ECR for this new project's Docker images
-Write-Host " 🆕  Creating ECR Repository..."
-aws ecr create-repository `
-    --repository-name $projectName `
-    --image-scanning-configuration "scanOnPush=true" `
-    --image-tag-mutability "MUTABLE" | Out-Null
-
-
-Write-Host "-----------------------------------"
-Write-Host "     BUILDING DOCKER CONTAINER     "
-Write-Host "-----------------------------------"
-
-# Build the Docker container and set it up (tag the container) 
-# to get ready to be uploaded to ECR. Then, push to ECR.
-Write-Host " 🛠️   Building container..."
-docker build -t "${projectName}:latest" . | Out-Null
-Write-Host " 🏷️   Tagging container..."
-docker tag "${projectName}:latest" "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:latest" | Out-Null
-Write-Host " 🚀  Pushing container to ECR..."
-docker push "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:latest" | Out-Null
-
-
-Write-Host "-----------------------------------"
-Write-Host "     CREATING SECRETS MANAGER      "
-Write-Host "-----------------------------------"
-
-# Create a secrets repository within Secrets Manager to house our environment variables
-# for the project, rather than storing them in plaintext on the Lambda itself
-Write-Host " 🆕  Creating new secret in Secrets Manager..."
-$secretID = "${projectName}/secrets-$(New-Random-String)"
-$secretARN = aws secretsmanager create-secret `
-    --name $secretID `
-    --description "Environment variables for ${projectName}" `
-    --secret-string '0.0.0.0' | ConvertFrom-Json | Select-Object -ExpandProperty Arn
-
-# Wait until the secret is available
-Write-Host " ⏳  Waiting for secret '$secretID' to become available..."
-Wait-ForAWSResource -ResourceName $secretID -Command {
-    aws secretsmanager describe-secret --secret-id $secretID 2>$null | Out-Null
-}
-
-
-Write-Host "-----------------------------------"
-Write-Host "    CREATING APPRUNNER SERVICE     "
-Write-Host "-----------------------------------"
-
-$sourceConfig = @{
-    ImageRepository             = @{
-        ImageIdentifier     = "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:latest"
-        ImageConfiguration  = @{
-            Port                      = "3000"
-            RuntimeEnvironmentSecrets = @{"HOSTNAME" = $secretARN }
-        }
-        ImageRepositoryType = "ECR"
-    }
-    AutoDeploymentsEnabled      = $false
-    AuthenticationConfiguration = @{
-        AccessRoleArn = "arn:aws:iam::387815262971:role/service-role/AppRunnerECRAccessRole123"
-    }
-} | ConvertTo-Json -Depth 10 -Compress
-$instanceConfig = @{
-    Cpu             = "1 vCPU"
-    Memory          = "2 GB"
-    InstanceRoleArn = "arn:aws:iam::387815262971:role/apprunner-secret-role"
-} | ConvertTo-Json -Depth 10 -Compress
-
-# Create a new AppRunner service for hosting our site
-$serviceName = "${projectName}-service"
-$serviceOutput = aws apprunner create-service `
-    --service-name $serviceName `
-    --source-configuration $sourceConfig `
-    --instance-configuration $instanceConfig `
-    --query '{OperationId: OperationId, ServiceUrl: Service.ServiceUrl, ServiceArn: Service.ServiceArn}' | ConvertFrom-Json
-
-$serviceARN = $serviceOutput.ServiceArn
-$serviceURL = $serviceOutput.ServiceUrl
-
-# $serviceOpId = $serviceOutput.OperationId
-# Wait-ForAWSResource -ResourceName $serviceName -DelaySeconds 60 -Command {
-#     $serviceStatus = aws apprunner list-operations --service-arn $serviceARN | ConvertFrom-Json | Select-Object -ExpandProperty OperationSummaryList | Where-Object { $_.Id -eq $serviceOpId } | Select-Object -ExpandProperty Status
-#     if ($serviceStatus -ne "SUCCEEDED") {
-#         cmd /c exit 20
-#     }
-# }
-
-
-Write-Host "-----------------------------------"
-Write-Host "    CREATING CODEBUILD PROJECT     "
-Write-Host "-----------------------------------"
-
-# Create the policy for allowing the usage of CodeBuild for GH Actions
-$awsCodeBuildAssumeRolePolicy = @{
-    Version   = "2012-10-17"
-    Statement = @(
-        @{
-            Effect    = "Allow"
-            Principal = @{ Service = "codebuild.amazonaws.com" }
-            Action    = "sts:AssumeRole"
-        }
-    )
-} | ConvertTo-Json -Depth 10 -Compress
-
-# Create the policy for what the role is allowed to interact with
-#   CodeDeploy/CodeBuild - allow to call deployments and builds
-#   ECR - allow for reading images from ECR
-#   Logs - Needed to write logs to CloudWatch
-#   Lambda - Needed to update Lambda / create new lambda alias/version
-$awsCodeBuildPolicy = @{
-    Version   = "2012-10-17"
-    Statement = @(
-        @{
-            Sid      = "Auth0"
-            Effect   = "Allow"
-            Action   = @(
-                "codedeploy:*"
-                "codebuild:*"
-                "ecr:*"
-                "logs:*"
-                "apprunner:*"
-            )
-            Resource = "*"
-        }
-    )
-} | ConvertTo-Json -Depth 10 -Compress
-
-# Create the CodeBuild role with the AssumeRole policy created above
-# and extract the ARN of the newly created role
-Write-Host " 🆕  Creating CodeBuild role..."
-$awsCodeBuildRoleName = "codebuild-${projectName}-role"
-$awsCodeBuildRoleArn = aws iam create-role `
-    --role-name $awsCodeBuildRoleName `
-    --assume-role-policy-document $awsCodeBuildAssumeRolePolicy | ConvertFrom-Json | Select-Object -ExpandProperty Role | Select-Object -ExpandProperty Arn
-  
-# Use the role ARN we just obtained to attach the other policy defined above
-aws iam put-role-policy `
-    --role-name $awsCodeBuildRoleName `
-    --policy-name "codebuild-${projectName}-policy" `
-    --policy-document $awsCodeBuildPolicy | Out-Null
-
-# Wait 10 seconds for the role to be propogated across services
-Write-Host " 😴  Sleeping for 10 seconds..."
-Start-Sleep -Seconds 10
-
-# Define the source for a CodeBuild project, which will point to our newly created
-# GitHub repo to integrate CodeBuild with our GitHub Actions script
-$source = @{
-    type              = "GITHUB"
-    location          = $awsGitHubRepoURL
-    reportBuildStatus = $true
-} | ConvertTo-Json -Compress
-
-# Nothing will be generated from the builds, since the images are stored in ECR
-# and its all that's needed
-$artifacts = @{
-    type = "NO_ARTIFACTS"
-} | ConvertTo-Json -Compress
-
-# Define the environment for the CodeBuild execution, as well as any environment
-# variables needed for the "buildspec.yml" file
-$environment = @{
-    type                     = "LINUX_CONTAINER"
-    image                    = "aws/codebuild/amazonlinux2-x86_64-standard:5.0"
-    computeType              = "BUILD_GENERAL1_SMALL"
-    privilegedMode           = $true
-    imagePullCredentialsType = "CODEBUILD"
-    environmentVariables     = @(
-        @{ name = "awsRegion"; value = $awsRegion; type = "PLAINTEXT" }
-        @{ name = "awsAccountID"; value = $awsAccountID; type = "PLAINTEXT" }
-        @{ name = "dockerContainerName"; value = $projectName; type = "PLAINTEXT" }
-        @{ name = "serviceARN"; value = $serviceARN; type = "PLAINTEXT" }
-    )
-} | ConvertTo-Json -Depth 10 -Compress
-
-# Create the CodeBuild project, using the above parameters/configurations/roles
-Write-Host " 🆕  Creating CodeBuild project..."
-aws codebuild create-project `
-    --name $projectName `
-    --source $source `
-    --artifacts $artifacts `
-    --environment $environment `
-    --service-role $awsCodeBuildRoleArn | Out-Null
-
-
-Write-Host "-----------------------------------"
-Write-Host "    CREATING CODEDEPLOY PROJECT    "
-Write-Host "-----------------------------------"
-# Create the policy for allowing the usage of CodeDeploy for GH Actions
-$awsCodeDeployAssumeRolePolicyDocument = @{
-    Version   = "2012-10-17"
-    Statement = @(
-        @{
-            Effect    = "Allow"
-            Principal = @{
-                Service = "codedeploy.amazonaws.com"
-            }
-            Action    = "sts:AssumeRole"
-        }
-    )
-} | ConvertTo-Json -Depth 3
-
-$awsCodeDeployAppRunnerPolicyDocument = @{
-    Version   = "2012-10-17"
-    Statement = @(
-        @{
-            Effect   = "Allow"
-            Action   = @(
-                "apprunner:StartDeployment"
-            )
-            Resource = "${serviceARN}"
-        }
-    )
-} | ConvertTo-Json -Depth 10 -Compress
-
-# Create the CodeDeploy role using the assume role policy above and Extract the role ARN
-$awsCodeDeployRoleName = "codedeploy-${projectName}-role"
-Write-Host " 🆕  Creating CodeDeploy role..."
-$awsCodeDeployRoleArn = aws iam create-role `
-    --role-name $awsCodeDeployRoleName `
-    --assume-role-policy-document $awsCodeDeployAssumeRolePolicyDocument | ConvertFrom-Json | Select-Object -ExpandProperty Role | Select-Object -ExpandProperty Arn
-
-# Attach two managed AWS policies to the newly created CodeDeploy role 
-# for interacting with ECR and CodeDeploy (specifically for Lambda)
-aws iam attach-role-policy `
-    --role-name $awsCodeDeployRoleName `
-    --policy-arn "arn:aws:iam::aws:policy/AmazonElasticContainerRegistryPublicFullAccess" | Out-Null
-
-# Use the role ARN we just obtained to attach the other policy defined above
-aws iam put-role-policy `
-    --role-name $awsCodeDeployRoleName `
-    --policy-name "codedeploy-${projectName}-apprunner-policy" `
-    --policy-document $awsCodeDeployAppRunnerPolicyDocument | Out-Null
-
-# Wait 10 seconds for the role to be propogated across services
-Write-Host " 😴  Sleeping for 10 seconds..."
-Start-Sleep -Seconds 10
-
-# Create the CodeDeploy application, which will be executed via a Lambda function
-Write-Host " 🆕  Creating CodeDeploy application..."
-aws deploy create-application `
-    --application-name "${projectName}-deploy" `
-    --compute-platform "Lambda" | Out-Null
-
-# Define a deployment group for the CodeDeploy project
-$awsCodeBuildDeployStyle = @{
-    deploymentType   = "BLUE_GREEN"
-    deploymentOption = "WITH_TRAFFIC_CONTROL"
-} | ConvertTo-Json
-Write-Host " 🆕  Creating CodeDeploy deployment group..."
-aws deploy create-deployment-group `
-    --application-name "${projectName}-deploy" `
-    --deployment-group-name "${projectName}-deploy-group" `
-    --service-role-arn $awsCodeDeployRoleArn `
-    --deployment-style $awsCodeBuildDeployStyle | Out-Null
-
-
-
-#==========================
-# 5. SETUP TERRAFORM
+# 4. SETUP TERRAFORM
 #==========================
 Write-Host "==================================="
 Write-Host "SETTING UP TERRAFORM"
@@ -726,26 +460,315 @@ terraform apply -auto-approve | Out-Null
 
 
 #==========================
-# 6. INITIALIZE DATABASE
+# 5. INITIALIZE DATABASE
 #==========================
 Write-Host "==================================="
 Write-Host "INITIALIZING DATABASE"
 Write-Host "==================================="
 
 if (-not (Test-Path $dbInitPath)) {
-    Write-Host "No database init script found at '$dbInitPath'. Skipping..."
+  Write-Host "No database init script found at '$dbInitPath'. Skipping..."
 }
 else {
-    # Wait 10 seconds to give the RDS instance some time when coming online
-    Write-Host " 😴  Sleeping for 10 seconds..."
-    Start-Sleep -Seconds 10
+  # Wait 10 seconds to give the RDS instance some time when coming online
+  Write-Host " 😴  Sleeping for 10 seconds..."
+  Start-Sleep -Seconds 10
     
-    # Initialize the database with a SQL initialization script, for defining tables/functions/etc.
-    Write-Host " 🎬  Initializing database..."
-    $env:PGPASSWORD = $dbPass
-    psql -h $rdsHost -p 5432 -U $rdsUser -d $dbName -f $dbInitPath
-    Remove-Item Env:PGPASSWORD
+  # Initialize the database with a SQL initialization script, for defining tables/functions/etc.
+  Write-Host " 🎬  Initializing database..."
+  $env:PGPASSWORD = $dbPass
+  psql -h $rdsHost -p 5432 -U $rdsUser -d $dbName -f $dbInitPath
+  Remove-Item Env:PGPASSWORD
 }
+
+
+
+#==========================
+# 6. CREATE AWS INFRA
+#==========================
+Write-Host "==================================="
+Write-Host "CREATING AWS INFRASTRUCTURE"
+Write-Host "==================================="
+Write-Host "-----------------------------------"
+Write-Host "      CONNECTING TO AWS ECR        "
+Write-Host "-----------------------------------"
+
+# login to ECR for Docker
+Write-Host " 🔑  Logging into ECR..."
+aws ecr get-login-password --region $awsRegion | docker login --username "AWS" --password-stdin "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com" | Out-Null
+
+# Create a new repository within ECR for this new project's Docker images
+Write-Host " 🆕  Creating ECR Repository..."
+aws ecr create-repository `
+  --repository-name $projectName `
+  --image-scanning-configuration "scanOnPush=true" `
+  --image-tag-mutability "MUTABLE" | Out-Null
+
+
+Write-Host "-----------------------------------"
+Write-Host "     BUILDING DOCKER CONTAINER     "
+Write-Host "-----------------------------------"
+
+# Build the Docker container and set it up (tag the container) 
+# to get ready to be uploaded to ECR. Then, push to ECR.
+Write-Host " 🛠️   Building container..."
+docker build -t "${projectName}:latest" . | Out-Null
+Write-Host " 🏷️   Tagging container..."
+docker tag "${projectName}:latest" "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:latest" | Out-Null
+Write-Host " 🚀  Pushing container to ECR..."
+docker push "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:latest" | Out-Null
+
+
+Write-Host "-----------------------------------"
+Write-Host "     CREATING SECRETS MANAGER      "
+Write-Host "-----------------------------------"
+
+
+# Create a secrets repository within Secrets Manager to house our environment variables
+# for the project, rather than storing them in plaintext on the Lambda itself
+Write-Host " 🆕  Creating new secret in Secrets Manager..."
+
+# Generate a name for the secrets
+$secretID = "${projectName}/secrets-$(New-Random-String)"
+
+# Define key-value pairs as a hashtable
+$secretString = @{
+  DB_HOST     = "${rdsHost}"
+  DB_DATABASE = "${dbName}"
+  DB_PORT     = "${rdsPort}"
+  DB_USER     = "${rdsUser}"
+  DB_PASS     = "${dbPass}"
+} | ConvertTo-Json -Compress
+
+# Create the secret in Secrets Manager, using the key/value pairs above
+# $secretARN = aws secretsmanager create-secret `
+aws secretsmanager create-secret `
+  --name $secretID `
+  --description "Environment variables for ${projectName}" `
+  --secret-string $secretString | ConvertFrom-Json | Select-Object -ExpandProperty Arn
+
+# Wait until the secret is available
+Write-Host " ⏳  Waiting for secret '$secretID' to become available..."
+Wait-ForAWSResource -ResourceName $secretID -Command {
+  aws secretsmanager describe-secret --secret-id $secretID 2>$null | Out-Null
+}
+
+
+Write-Host "-----------------------------------"
+Write-Host "    CREATING APPRUNNER SERVICE     "
+Write-Host "-----------------------------------"
+
+$sourceConfig = @{
+  ImageRepository             = @{
+    ImageIdentifier     = "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:latest"
+    ImageConfiguration  = @{
+      Port                      = "3000"
+      # RuntimeEnvironmentSecrets = @{ "HOSTNAME" = $secretARN }
+      RuntimeEnvironmentSecrets = @(
+        @{ "SECRET_ID" = $secretID }
+        @{ "HOSTNAME" = "0.0.0.0" }
+      )
+    }
+    ImageRepositoryType = "ECR"
+  }
+  AutoDeploymentsEnabled      = $false
+  AuthenticationConfiguration = @{
+    AccessRoleArn = "arn:aws:iam::387815262971:role/service-role/AppRunnerECRAccessRole123"
+  }
+} | ConvertTo-Json -Depth 10 -Compress
+$instanceConfig = @{
+  Cpu             = "1 vCPU"
+  Memory          = "2 GB"
+  InstanceRoleArn = "arn:aws:iam::387815262971:role/apprunner-secret-role"
+} | ConvertTo-Json -Depth 10 -Compress
+
+# Create a new AppRunner service for hosting our site
+$serviceName = "${projectName}-service"
+$serviceOutput = aws apprunner create-service `
+  --service-name $serviceName `
+  --source-configuration $sourceConfig `
+  --instance-configuration $instanceConfig `
+  --query '{OperationId: OperationId, ServiceUrl: Service.ServiceUrl, ServiceArn: Service.ServiceArn}' | ConvertFrom-Json
+
+$serviceARN = $serviceOutput.ServiceArn
+$serviceURL = $serviceOutput.ServiceUrl
+
+# $serviceOpId = $serviceOutput.OperationId
+# Wait-ForAWSResource -ResourceName $serviceName -DelaySeconds 60 -Command {
+#     $serviceStatus = aws apprunner list-operations --service-arn $serviceARN | ConvertFrom-Json | Select-Object -ExpandProperty OperationSummaryList | Where-Object { $_.Id -eq $serviceOpId } | Select-Object -ExpandProperty Status
+#     if ($serviceStatus -ne "SUCCEEDED") {
+#         cmd /c exit 20
+#     }
+# }
+
+
+Write-Host "-----------------------------------"
+Write-Host "    CREATING CODEBUILD PROJECT     "
+Write-Host "-----------------------------------"
+
+# Create the policy for allowing the usage of CodeBuild for GH Actions
+$awsCodeBuildAssumeRolePolicy = @{
+  Version   = "2012-10-17"
+  Statement = @(
+    @{
+      Effect    = "Allow"
+      Principal = @{ Service = "codebuild.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }
+  )
+} | ConvertTo-Json -Depth 10 -Compress
+
+# Create the policy for what the role is allowed to interact with
+#   CodeDeploy/CodeBuild - allow to call deployments and builds
+#   ECR - allow for reading images from ECR
+#   Logs - Needed to write logs to CloudWatch
+#   Lambda - Needed to update Lambda / create new lambda alias/version
+$awsCodeBuildPolicy = @{
+  Version   = "2012-10-17"
+  Statement = @(
+    @{
+      Sid      = "Auth0"
+      Effect   = "Allow"
+      Action   = @(
+        "codedeploy:*"
+        "codebuild:*"
+        "ecr:*"
+        "logs:*"
+        "apprunner:*"
+      )
+      Resource = "*"
+    }
+  )
+} | ConvertTo-Json -Depth 10 -Compress
+
+# Create the CodeBuild role with the AssumeRole policy created above
+# and extract the ARN of the newly created role
+Write-Host " 🆕  Creating CodeBuild role..."
+$awsCodeBuildRoleName = "codebuild-${projectName}-role"
+$awsCodeBuildRoleArn = aws iam create-role `
+  --role-name $awsCodeBuildRoleName `
+  --assume-role-policy-document $awsCodeBuildAssumeRolePolicy | ConvertFrom-Json | Select-Object -ExpandProperty Role | Select-Object -ExpandProperty Arn
+  
+# Use the role ARN we just obtained to attach the other policy defined above
+aws iam put-role-policy `
+  --role-name $awsCodeBuildRoleName `
+  --policy-name "codebuild-${projectName}-policy" `
+  --policy-document $awsCodeBuildPolicy | Out-Null
+
+# Wait 10 seconds for the role to be propogated across services
+Write-Host " 😴  Sleeping for 10 seconds..."
+Start-Sleep -Seconds 10
+
+# Define the source for a CodeBuild project, which will point to our newly created
+# GitHub repo to integrate CodeBuild with our GitHub Actions script
+$source = @{
+  type              = "GITHUB"
+  location          = $awsGitHubRepoURL
+  reportBuildStatus = $true
+} | ConvertTo-Json -Compress
+
+# Nothing will be generated from the builds, since the images are stored in ECR
+# and its all that's needed
+$artifacts = @{
+  type = "NO_ARTIFACTS"
+} | ConvertTo-Json -Compress
+
+# Define the environment for the CodeBuild execution, as well as any environment
+# variables needed for the "buildspec.yml" file
+$environment = @{
+  type                     = "LINUX_CONTAINER"
+  image                    = "aws/codebuild/amazonlinux2-x86_64-standard:5.0"
+  computeType              = "BUILD_GENERAL1_SMALL"
+  privilegedMode           = $true
+  imagePullCredentialsType = "CODEBUILD"
+  environmentVariables     = @(
+    @{ name = "awsRegion"; value = $awsRegion; type = "PLAINTEXT" }
+    @{ name = "awsAccountID"; value = $awsAccountID; type = "PLAINTEXT" }
+    @{ name = "dockerContainerName"; value = $projectName; type = "PLAINTEXT" }
+    @{ name = "serviceARN"; value = $serviceARN; type = "PLAINTEXT" }
+  )
+} | ConvertTo-Json -Depth 10 -Compress
+
+# Create the CodeBuild project, using the above parameters/configurations/roles
+Write-Host " 🆕  Creating CodeBuild project..."
+aws codebuild create-project `
+  --name $projectName `
+  --source $source `
+  --artifacts $artifacts `
+  --environment $environment `
+  --service-role $awsCodeBuildRoleArn | Out-Null
+
+
+Write-Host "-----------------------------------"
+Write-Host "    CREATING CODEDEPLOY PROJECT    "
+Write-Host "-----------------------------------"
+# Create the policy for allowing the usage of CodeDeploy for GH Actions
+$awsCodeDeployAssumeRolePolicyDocument = @{
+  Version   = "2012-10-17"
+  Statement = @(
+    @{
+      Effect    = "Allow"
+      Principal = @{
+        Service = "codedeploy.amazonaws.com"
+      }
+      Action    = "sts:AssumeRole"
+    }
+  )
+} | ConvertTo-Json -Depth 3
+
+$awsCodeDeployAppRunnerPolicyDocument = @{
+  Version   = "2012-10-17"
+  Statement = @(
+    @{
+      Effect   = "Allow"
+      Action   = @(
+        "apprunner:StartDeployment"
+      )
+      Resource = "${serviceARN}"
+    }
+  )
+} | ConvertTo-Json -Depth 10 -Compress
+
+# Create the CodeDeploy role using the assume role policy above and Extract the role ARN
+$awsCodeDeployRoleName = "codedeploy-${projectName}-role"
+Write-Host " 🆕  Creating CodeDeploy role..."
+$awsCodeDeployRoleArn = aws iam create-role `
+  --role-name $awsCodeDeployRoleName `
+  --assume-role-policy-document $awsCodeDeployAssumeRolePolicyDocument | ConvertFrom-Json | Select-Object -ExpandProperty Role | Select-Object -ExpandProperty Arn
+
+# Attach two managed AWS policies to the newly created CodeDeploy role 
+# for interacting with ECR and CodeDeploy (specifically for Lambda)
+aws iam attach-role-policy `
+  --role-name $awsCodeDeployRoleName `
+  --policy-arn "arn:aws:iam::aws:policy/AmazonElasticContainerRegistryPublicFullAccess" | Out-Null
+
+# Use the role ARN we just obtained to attach the other policy defined above
+aws iam put-role-policy `
+  --role-name $awsCodeDeployRoleName `
+  --policy-name "codedeploy-${projectName}-apprunner-policy" `
+  --policy-document $awsCodeDeployAppRunnerPolicyDocument | Out-Null
+
+# Wait 10 seconds for the role to be propogated across services
+Write-Host " 😴  Sleeping for 10 seconds..."
+Start-Sleep -Seconds 10
+
+# Create the CodeDeploy application, which will be executed via a Lambda function
+Write-Host " 🆕  Creating CodeDeploy application..."
+aws deploy create-application `
+  --application-name "${projectName}-deploy" `
+  --compute-platform "Lambda" | Out-Null
+
+# Define a deployment group for the CodeDeploy project
+$awsCodeBuildDeployStyle = @{
+  deploymentType   = "BLUE_GREEN"
+  deploymentOption = "WITH_TRAFFIC_CONTROL"
+} | ConvertTo-Json
+Write-Host " 🆕  Creating CodeDeploy deployment group..."
+aws deploy create-deployment-group `
+  --application-name "${projectName}-deploy" `
+  --deployment-group-name "${projectName}-deploy-group" `
+  --service-role-arn $awsCodeDeployRoleArn `
+  --deployment-style $awsCodeBuildDeployStyle | Out-Null
 
 
 
@@ -760,11 +783,15 @@ Write-Host "==================================="
 Write-Host " 📁  Moving back to project root directory..."
 Set-Location ..
 
+# Install extra npm libraries/packages
+npm install @aws-sdk/client-secrets-manager pg
+npm install -D @types/pg
+
 # Add GitHub Actions workflow file
 # Ensure the folder structure exists
 $folderPath = ".github/workflows"
 if (-not (Test-Path $folderPath)) {
-    New-Item -ItemType Directory -Path $folderPath -Force | Out-Null
+  New-Item -ItemType Directory -Path $folderPath -Force | Out-Null
 }
 
 @'
@@ -841,17 +868,177 @@ phases:
       - aws apprunner start-deployment --service-arn $serviceARN
 '@ | Set-Content -Path "buildspec.yml"
 
-# Update .gitignore/.dockerignore files to include "/.terraform" folder
+# Add "patch-server.js" script to add a block of code to the generated server.js file 
+# (as part of the NextJS build process) to make sure app has access to secrets in AWS Secrets Manager
+@"
+import fs from "fs";
+import path from "path";
+
+const serverJsPath = path.resolve(".next/standalone/server.js");
+
+// Load the existing content
+let serverJs = fs.readFileSync(serverJsPath, "utf8");
+
+// Prepare the patch code to inject at the top
+const injectCode = `
+import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
+
+const client = new SecretsManagerClient({ region: "${awsRegion}" });
+
+async function loadSecrets() {
+  const command = new GetSecretValueCommand({ SecretId: process.env.SECRET_ID });
+  const response = await client.send(command);
+  const secrets = JSON.parse(response.SecretString);
+  for (const [key, value] of Object.entries(secrets)) {
+    if (!process.env[key]) {
+      process.env[key] = value;
+    }
+  }
+}
+
+// Block the app from starting until secrets are loaded
+await loadSecrets();
+`;
+
+// Inject the code after the first import statements
+// We'll find the first line that starts with a comment or executable code
+const insertPoint = serverJs.indexOf("\n");
+
+serverJs = serverJs.slice(0, insertPoint) + "\n" + injectCode + serverJs.slice(insertPoint);
+
+// Write the modified file back
+fs.writeFileSync(serverJsPath, serverJs);
+
+console.log("✅ Patched server.js with AWS Secrets Manager bootstrap code");
+"@ | Set-Content -Path "patch-server.js"
+
+# Create LOCAL .env file (connects to local PostgreSQL instance, for development/testing)
+Write-Host " 🆕  Creating .env file..."
+Remove-Item ".env"
+@"
+# Port for the Fastify API to run on
+PORT="3000"
+
+## AWS Secrets Manager secret ID (for environment variables)
+#SECRET_ID="$secretID"
+
+# PostgreSQL database connection details
+DB_HOST="localhost"
+DB_DATABASE="$dbName"
+DB_PORT="5432"
+DB_USER="$rdsUser"
+DB_PASS="Super!345Q"
+"@ | Set-Content -Path ".env"
+
+# Create PROD .env file (connects to RDS PostgreSQL instance, for production)
+Write-Host " 🆕  Creating .env.prod file..."
+@"
+# Port for the Fastify API to run on
+PORT="3000"
+
+# AWS Secrets Manager secret ID (for environment variables)
+SECRET_ID="$secretID"
+
+# PostgreSQL database connection details
+DB_HOST="$rdsHost"
+DB_DATABASE="$dbName"
+DB_PORT="$rdsPort"
+DB_USER="$rdsUser"
+DB_PASS="$dbPass"
+"@ | Set-Content -Path ".env.prod"
+
+# Create 'update-secrets.sh' file
+Write-Host " 🆕  Creating update-secrets.sh file..."
+$hereStringSecret = @'
+$envFile = ".env.prod"
+$secretID = "{{MY_SECRET}}"
+
+Write-Host " 🔐  Syncing environment variables from '${envFile}' to AWS Secrets Manager secret '${secretID}'..."
+
+# Get current secret from Secrets Manager (default to empty object if not found)
+try {
+    $currentSecretJson = aws secretsmanager get-secret-value --secret-id $secretID | ConvertFrom-Json
+    $currentSecret = $currentSecretJson.SecretString | ConvertFrom-Json
+}
+catch {
+    Write-Host " ⚠️  Secret not found or empty. Starting with a new one."
+    $currentSecret = @{}
+}
+
+# Read and parse the .env file
+$envVars = @{}
+
+Get-Content $envFile | ForEach-Object {
+    $line = $_.Trim()
+    if ($line -match '^\s*#' -or [string]::IsNullOrWhiteSpace($line)) { return }
+
+    $parts = $line -split '=', 2
+    if ($parts.Count -ne 2) { return }
+
+    $key = $parts[0].Trim()
+    $value = $parts[1].Trim().Trim('"')  # Remove surrounding quotes if present
+    if (-not $key -or -not $value) { return }
+
+    $envVars[$key] = $value
+}
+
+# Merge missing or changed keys
+$updated = $false
+
+foreach ($key in $envVars.Keys) {
+    $newValue = $envVars[$key]
+    if ($currentSecret.PSObject.Properties.Name -notcontains $key) {
+        Write-Host " ➕  Adding $key..."
+        $currentSecret | Add-Member -NotePropertyName $key -NotePropertyValue $newValue -Force
+        $updated = $true
+    } elseif ($currentSecret.$key -ne $newValue) {
+        Write-Host " 🔄  Updating $key..."
+        $currentSecret | Add-Member -NotePropertyName $key -NotePropertyValue $newValue -Force
+        $updated = $true
+    }
+}
+
+if ($updated) {
+    $updatedSecretJson = $currentSecret | ConvertTo-Json -Depth 100 -Compress
+    Write-Host " 🚀  Updating secret in AWS..."
+    aws secretsmanager update-secret `
+        --secret-id $secretID `
+        --secret-string "$updatedSecretJson" | Out-Null
+    Write-Host " ✅  Secret updated successfully."
+}
+else {
+    Write-Host " ✅  No changes needed. Secret is up-to-date."
+}
+'@ 
+$hereStringSecret = $hereStringSecret.Replace("{{MY_SECRET}}", $secretID)
+$hereStringSecret | Set-Content -Path "update-secrets.ps1"
+
+# Update .gitignore/.dockerignore files
 @'
 
 # Terraform
 .terraform/
+
+.env
+.env.local
+.env.prod
 '@ | Add-Content -Path ".gitignore"
 @'
 
 # Terraform
 .terraform/
+
+.env
+.env.local
+.env.prod
 '@ | Add-Content -Path ".dockerignore"
+
+# Load package.json into a PowerShell object, modify the "build" script
+# and convert back to JSON and write it back to file (with proper formatting)
+$packageJsonPath = "package.json"
+$packageJson = Get-Content $packageJsonPath | ConvertFrom-Json
+$packageJson.scripts.build = "next build && node patch-server.js"
+$packageJson | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $packageJsonPath
 
 
 
