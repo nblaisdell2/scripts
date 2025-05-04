@@ -431,7 +431,7 @@ $endpoint = $terraformOutput.out_db_endpoint.value
 #   value is returned in format: "{host}:{port}"
 $parts = $endpoint -split ":"
 $rdsHost = $parts[0]
-# $rdsPort = $parts[1]
+$rdsPort = $parts[1]
 $rdsUser = "postgres"
 
 # Run terraform destroy to remove the newly created instance, 
@@ -456,6 +456,10 @@ project_name    = "${projectName}"
 # Re-run terraform apply to bring the database instance back, using the snapshot going forward
 Write-Host " 🆕  Re-creating PostgreSQL instance..."
 terraform apply -auto-approve | Out-Null
+
+# Move back into the project's root directory for the rest of the project setup
+Write-Host " 📁  Moving back to project root directory..."
+Set-Location ..
 
 
 
@@ -523,7 +527,6 @@ Write-Host "-----------------------------------"
 Write-Host "     CREATING SECRETS MANAGER      "
 Write-Host "-----------------------------------"
 
-
 # Create a secrets repository within Secrets Manager to house our environment variables
 # for the project, rather than storing them in plaintext on the Lambda itself
 Write-Host " 🆕  Creating new secret in Secrets Manager..."
@@ -541,17 +544,10 @@ $secretString = @{
 } | ConvertTo-Json -Compress
 
 # Create the secret in Secrets Manager, using the key/value pairs above
-# $secretARN = aws secretsmanager create-secret `
-aws secretsmanager create-secret `
+$secretARN = aws secretsmanager create-secret `
   --name $secretID `
   --description "Environment variables for ${projectName}" `
-  --secret-string $secretString | ConvertFrom-Json | Select-Object -ExpandProperty Arn
-
-# Wait until the secret is available
-Write-Host " ⏳  Waiting for secret '$secretID' to become available..."
-Wait-ForAWSResource -ResourceName $secretID -Command {
-  aws secretsmanager describe-secret --secret-id $secretID 2>$null | Out-Null
-}
+  --secret-string $secretString | ConvertFrom-Json | Select-Object -ExpandProperty ARN
 
 
 Write-Host "-----------------------------------"
@@ -562,12 +558,13 @@ $sourceConfig = @{
   ImageRepository             = @{
     ImageIdentifier     = "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:latest"
     ImageConfiguration  = @{
-      Port                      = "3000"
-      # RuntimeEnvironmentSecrets = @{ "HOSTNAME" = $secretARN }
-      RuntimeEnvironmentSecrets = @(
-        @{ "SECRET_ID" = $secretID }
-        @{ "HOSTNAME" = "0.0.0.0" }
-      )
+      Port                        = "3000"
+      RuntimeEnvironmentVariables = @{
+        "HOSTNAME" = "0.0.0.0"
+      }
+      RuntimeEnvironmentSecrets   = @{
+        "SECRET_ID" = "$secretARN"
+      }
     }
     ImageRepositoryType = "ECR"
   }
@@ -592,14 +589,6 @@ $serviceOutput = aws apprunner create-service `
 
 $serviceARN = $serviceOutput.ServiceArn
 $serviceURL = $serviceOutput.ServiceUrl
-
-# $serviceOpId = $serviceOutput.OperationId
-# Wait-ForAWSResource -ResourceName $serviceName -DelaySeconds 60 -Command {
-#     $serviceStatus = aws apprunner list-operations --service-arn $serviceARN | ConvertFrom-Json | Select-Object -ExpandProperty OperationSummaryList | Where-Object { $_.Id -eq $serviceOpId } | Select-Object -ExpandProperty Status
-#     if ($serviceStatus -ne "SUCCEEDED") {
-#         cmd /c exit 20
-#     }
-# }
 
 
 Write-Host "-----------------------------------"
@@ -779,10 +768,6 @@ Write-Host "==================================="
 Write-Host "SETTING UP LOCAL REPO"
 Write-Host "==================================="
 
-# Move back into the project's root directory for the rest of the project setup
-Write-Host " 📁  Moving back to project root directory..."
-Set-Location ..
-
 # Install extra npm libraries/packages
 npm install @aws-sdk/client-secrets-manager pg
 npm install -D @types/pg
@@ -947,8 +932,8 @@ DB_USER="$rdsUser"
 DB_PASS="$dbPass"
 "@ | Set-Content -Path ".env.prod"
 
-# Create 'update-secrets.sh' file
-Write-Host " 🆕  Creating update-secrets.sh file..."
+# Create 'update-secrets.ps1' file
+Write-Host " 🆕  Creating update-secrets.ps1 file..."
 $hereStringSecret = @'
 $envFile = ".env.prod"
 $secretID = "{{MY_SECRET}}"
@@ -1019,8 +1004,6 @@ $hereStringSecret | Set-Content -Path "update-secrets.ps1"
 # Terraform
 .terraform/
 
-.env
-.env.local
 .env.prod
 '@ | Add-Content -Path ".gitignore"
 @'
@@ -1028,16 +1011,34 @@ $hereStringSecret | Set-Content -Path "update-secrets.ps1"
 # Terraform
 .terraform/
 
-.env
-.env.local
 .env.prod
 '@ | Add-Content -Path ".dockerignore"
 
-# Load package.json into a PowerShell object, modify the "build" script
-# and convert back to JSON and write it back to file (with proper formatting)
+# Load and parse package.json
 $packageJsonPath = "package.json"
-$packageJson = Get-Content $packageJsonPath | ConvertFrom-Json
-$packageJson.scripts.build = "next build && node patch-server.js"
+$packageJson = Get-Content $packageJsonPath -Raw | ConvertFrom-Json
+
+# Ensure 'scripts' exists
+if (-not $packageJson.PSObject.Properties['scripts']) {
+  $packageJson | Add-Member -MemberType NoteProperty -Name scripts -Value ([PSCustomObject]@{})
+}
+
+# Convert scripts to a hashtable so we can add properties
+$scripts = @{}
+
+# Copy existing properties from JSON to the hashtable
+$packageJson.scripts.PSObject.Properties | ForEach-Object {
+  $scripts[$_.Name] = $_.Value
+}
+
+# Modify/add properties safely
+$scripts['build'] = "next build && node patch-server.js"
+$scripts['secrets'] = "pwsh -ExecutionPolicy Bypass -File ./update-secrets.ps1"
+
+# Reassign modified scripts back to the packageJson object
+$packageJson.scripts = [PSCustomObject]$scripts
+
+# Convert back to JSON and save
 $packageJson | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $packageJsonPath
 
 
@@ -1046,7 +1047,7 @@ $packageJson | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $packageJso
 # 8. PUSH REPO TO GITHUB
 #==========================
 Write-Host "==================================="
-Write-Host "PUSING CODE TO GITHUB"
+Write-Host "PUSHING CODE TO GITHUB"
 Write-Host "==================================="
 
 # Push the code to GitHub, triggering a GitHub actions build
@@ -1058,7 +1059,29 @@ git push -u origin main | Out-Null
 
 
 #==========================
-# 9. OUTPUTS
+# 9. WAIT FOR APPRUNNER SERVICE
+#==========================
+Write-Host "==================================="
+Write-Host "WAIT FOR APPRUNNER SERVICE"
+Write-Host "==================================="
+
+# Get the Service Operation ID from the creation of our AppRunner service
+# from the earlier AWS Infrastructrue step, so we can determine if the service
+# is up-and-running yet, or if it's still in progress
+$serviceOpId = $serviceOutput.OperationId
+
+# Wait for the AppRunner Service to be available before opening the project,
+# so the user is able to navigate to the live site immediately upon development
+Wait-ForAWSResource -ResourceName $serviceName -DelaySeconds 60 -Command {
+  $serviceStatus = aws apprunner list-operations --service-arn $serviceARN | ConvertFrom-Json | Select-Object -ExpandProperty OperationSummaryList | Where-Object { $_.Id -eq $serviceOpId } | Select-Object -ExpandProperty Status
+  if ($serviceStatus -ne "SUCCEEDED") {
+    cmd /c exit 20
+  }
+}
+
+
+#==========================
+# 10. OUTPUTS
 #==========================
 Write-Host "==================================="
 Write-Host "OUTPUTS"
@@ -1079,7 +1102,7 @@ $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") | Out-Null
 
 
 #==========================
-# 10. OPEN PROJECT
+# 11. OPEN PROJECT
 #==========================
 # Lastly, open the current directory (the project directory) in VS Code to start developing!
 code .
