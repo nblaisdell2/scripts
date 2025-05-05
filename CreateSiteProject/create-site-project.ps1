@@ -74,7 +74,7 @@ function New-Random-String {
   )
 
   # Define possible characters
-  $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+  $chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
 
   # Build a 6-character random string
   $randomString = -join ((1..6) | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
@@ -142,6 +142,10 @@ Write-Host " ✅  Folder '$projectName' created successfully."
 # Move into the local directory for the rest of the steps
 Write-Host " 📁  Moving into local project directory..."
 Set-Location -Path $projectName
+
+# Install extra npm libraries/packages
+npm install @aws-sdk/client-secrets-manager @aws-sdk/client-s3 pg
+npm install -D @types/pg
 
 # Add the Dockerfile necessary for containerizing the application
 # Sourced from: https://create.t3.gg/en/deployment/docker#3-create-dockerfile
@@ -239,6 +243,207 @@ const config = {
 
 export default config;
 '@ | Set-Content -Path "next.config.js"
+
+# Add utils/db.ts file for working with PostgreSQL from NextJS (backend)
+# Ensure the folder structure exists
+$folderPath = "src/utils"
+if (-not (Test-Path $folderPath)) {
+  New-Item -ItemType Directory -Path $folderPath -Force | Out-Null
+}
+
+@'
+import type { QueryResultRow } from "pg";
+import { Pool } from "pg";
+import { env } from "../env";
+import fs from "fs";
+
+import path from "path";
+import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import { Readable } from "stream";
+
+const pemFilePath = path.join("/tmp", "rds-combined-ca-bundle.pem");
+
+async function downloadPemIfNeeded(): Promise<void> {
+  // Already downloaded
+  if (fs.existsSync(pemFilePath)) {
+    return;
+  }
+
+  const s3 = new S3Client({ region: env.AWS_REGION });
+  const command = new GetObjectCommand({
+    Bucket: env.SSL_PEM_BUCKET,
+    Key: env.SSL_PEM_KEY,
+  });
+
+  const response = await s3.send(command);
+
+  const streamToString = (stream: Readable): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const chunks: any[] = [];
+      stream.on("data", (chunk) => chunks.push(chunk));
+      stream.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+      stream.on("error", reject);
+    });
+
+  const pemContent = await streamToString(response.Body as Readable);
+  fs.writeFileSync(pemFilePath, pemContent);
+}
+
+async function getConnection() {
+  if (env.NODE_ENV == "development") {
+    return {
+      host: env.DB_HOST as string,
+      database: env.DB_DATABASE as string,
+      port: env.DB_PORT as unknown as number,
+      user: env.DB_USER as string,
+      password: env.DB_PASS as string,
+    };
+  } else {
+    await downloadPemIfNeeded();
+    return {
+      host: env.DB_HOST as string,
+      database: env.DB_DATABASE as string,
+      port: env.DB_PORT as unknown as number,
+      user: env.DB_USER as string,
+      password: env.DB_PASS as string,
+      ssl: {
+        require: true,
+        rejectUnauthorized: true,
+        ca: fs.readFileSync(pemFilePath).toString(),
+      },
+    };
+  }
+}
+
+let pool: Pool;
+
+async function getConnectionPool() {
+  if (!pool) {
+    const dbConn = await getConnection();
+    pool = new Pool(dbConn);
+  }
+  return pool;
+}
+
+function getFunctionSQL(
+  functionName: string,
+  ...params: any[]
+): { sql: string; params: any[] } {
+  const paramList = [...Array(params.length).keys()]
+    .map((v) => "$" + (v + 1))
+    .join(", ");
+
+  return { sql: `SELECT * FROM ${functionName}(${paramList});`, params };
+}
+
+function getProcedureSQL(
+  procedureName: string,
+  ...params: any[]
+): { sql: string; params: any[] } {
+  const paramList = [...Array(params.length).keys()]
+    .map((v) => "$" + (v + 1))
+    .join(", ");
+  return { sql: `CALL ${procedureName}(${paramList});`, params };
+}
+
+export async function querySQL<TResult extends QueryResultRow>(sql: string) {
+  const conn = await getConnectionPool();
+  const result = await conn.query<TResult>(sql);
+  return result;
+}
+
+export async function query<TResult extends QueryResultRow>(
+  functionName: string,
+  ...functionParams: any[]
+) {
+  const { sql, params } = getFunctionSQL(functionName, ...functionParams);
+  let result;
+  try {
+    const conn = await getConnectionPool();
+    result = await conn.query<TResult>(sql, params);
+  } catch (ex) {
+    console.log(ex);
+  }
+
+  return result;
+}
+
+export async function exec<TResult extends QueryResultRow>(
+  procName: string,
+  ...procParams: any[]
+) {
+  const { sql, params } = getProcedureSQL(procName, ...procParams);
+  const conn = await getConnectionPool();
+  const result = await conn.query<TResult>(sql, params);
+  return result;
+}
+'@ | Set-Content -Path "$folderPath/db.ts"
+
+Write-Host " 📁  Moving into project src directory..."
+Set-Location -Path "src"
+
+Remove-Item "env.js"
+@'
+import { createEnv } from "@t3-oss/env-nextjs";
+import { z } from "zod";
+
+export const env = createEnv({
+  /**
+   * Specify your server-side environment variables schema here. This way you can ensure the app
+   * isn't built with invalid env vars.
+   */
+  server: {
+    NODE_ENV: z.enum(["development", "test", "production"]),
+    DB_HOST: z.string().optional(),
+    DB_DATABASE: z.string().optional(),
+    DB_PORT: z.string().optional(),
+    DB_USER: z.string().optional(),
+    DB_PASS: z.string().optional(),
+    AWS_REGION: z.string().optional(),
+    SSL_PEM_BUCKET: z.string().optional(),
+    SSL_PEM_KEY: z.string().optional(),
+  },
+
+  /**
+   * Specify your client-side environment variables schema here. This way you can ensure the app
+   * isn't built with invalid env vars. To expose them to the client, prefix them with
+   * `NEXT_PUBLIC_`.
+   */
+  client: {
+    // NEXT_PUBLIC_CLIENTVAR: z.string(),
+  },
+
+  /**
+   * You can't destruct `process.env` as a regular object in the Next.js edge runtimes (e.g.
+   * middlewares) or client-side so we need to destruct manually.
+   */
+  runtimeEnv: {
+    NODE_ENV: process.env.NODE_ENV,
+    // NEXT_PUBLIC_CLIENTVAR: process.env.NEXT_PUBLIC_CLIENTVAR,
+    DB_HOST: process.env.DB_HOST,
+    DB_DATABASE: process.env.DB_DATABASE,
+    DB_PORT: process.env.DB_PORT,
+    DB_USER: process.env.DB_USER,
+    DB_PASS: process.env.DB_PASS,
+    AWS_REGION: process.env.AWS_REGION,
+    SSL_PEM_BUCKET: process.env.SSL_PEM_BUCKET,
+    SSL_PEM_KEY: process.env.SSL_PEM_KEY,
+  },
+  /**
+   * Run `build` or `dev` with `SKIP_ENV_VALIDATION` to skip env validation. This is especially
+   * useful for Docker builds.
+   */
+  skipValidation: !!process.env.SKIP_ENV_VALIDATION,
+  /**
+   * Makes it so that empty strings are treated as undefined. `SOME_VAR: z.string()` and
+   * `SOME_VAR=''` will throw an error.
+   */
+  emptyStringAsUndefined: true,
+});
+'@ | Set-Content -Path "env.js"
+
+Write-Host " 📁  Moving back into project directory..."
+Set-Location ..
 
 
 
@@ -524,6 +729,26 @@ docker push "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:l
 
 
 Write-Host "-----------------------------------"
+Write-Host "        CREATING S3 BUCKET         "
+Write-Host "-----------------------------------"
+
+# Download RDS certificate for connecting to instance via SSL
+$pemSource = "https://truststore.pki.rds.amazonaws.com/${awsRegion}/${awsRegion}-bundle.pem"
+$pemFileName = "${awsRegion}-bundle.pem"
+
+Invoke-WebRequest -Uri $pemSource -OutFile $pemFileName
+
+# Create S3 bucket for project and place the .pem file in the bucket
+$bucketName = "${projectName}-$(New-Random-String)"
+aws s3api create-bucket `
+  --bucket $bucketName `
+  --region $awsRegion | Out-Null
+
+aws s3 cp $pemFileName s3://$bucketName/ | Out-Null
+
+Remove-Item $pemFileName
+
+Write-Host "-----------------------------------"
 Write-Host "     CREATING SECRETS MANAGER      "
 Write-Host "-----------------------------------"
 
@@ -536,11 +761,14 @@ $secretID = "${projectName}/secrets-$(New-Random-String)"
 
 # Define key-value pairs as a hashtable
 $secretString = @{
-  DB_HOST     = "${rdsHost}"
-  DB_DATABASE = "${dbName}"
-  DB_PORT     = "${rdsPort}"
-  DB_USER     = "${rdsUser}"
-  DB_PASS     = "${dbPass}"
+  DB_HOST        = "${rdsHost}"
+  DB_DATABASE    = "${dbName}"
+  DB_PORT        = "${rdsPort}"
+  DB_USER        = "${rdsUser}"
+  DB_PASS        = "${dbPass}"
+  AWS_REGION     = "${awsRegion}"
+  SSL_PEM_BUCKET = "${bucketName}"
+  SSL_PEM_KEY    = "${pemFileName}"
 } | ConvertTo-Json -Compress
 
 # Create the secret in Secrets Manager, using the key/value pairs above
@@ -768,10 +996,6 @@ Write-Host "==================================="
 Write-Host "SETTING UP LOCAL REPO"
 Write-Host "==================================="
 
-# Install extra npm libraries/packages
-npm install @aws-sdk/client-secrets-manager pg
-npm install -D @types/pg
-
 # Add GitHub Actions workflow file
 # Ensure the folder structure exists
 $folderPath = ".github/workflows"
@@ -913,6 +1137,12 @@ DB_DATABASE="$dbName"
 DB_PORT="5432"
 DB_USER="$rdsUser"
 DB_PASS="Super!345Q"
+
+## Uncomment to connect to RDS instance
+#AWS_REGION="$awsRegion"
+#SSL_PEM_BUCKET="$bucketName"
+#SSL_PEM_KEY="$pemFileName"
+
 "@ | Set-Content -Path ".env"
 
 # Create PROD .env file (connects to RDS PostgreSQL instance, for production)
@@ -930,6 +1160,10 @@ DB_DATABASE="$dbName"
 DB_PORT="$rdsPort"
 DB_USER="$rdsUser"
 DB_PASS="$dbPass"
+
+AWS_REGION="$awsRegion"
+SSL_PEM_BUCKET="$bucketName"
+SSL_PEM_KEY="$pemFileName"
 "@ | Set-Content -Path ".env.prod"
 
 # Create 'update-secrets.ps1' file
