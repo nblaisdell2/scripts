@@ -1,4 +1,4 @@
-# Usage: ./create-site-project <project-name> <project-desc> <database-name> <db-password> <db-init-path> <aws-account-id> <aws-region> <gh-actions-role-name>
+﻿# Usage: ./create-site-project <project-name> <project-desc> <database-name> <db-password> <db-init-path> <aws-account-id> <aws-region> <gh-actions-role-name>
 
 param(
   [string]$projectName,
@@ -82,6 +82,24 @@ function New-Random-String {
   return $randomString
 }
 
+function Get-JSON-Path {
+    param(
+        [hashtable]$JSON_In,
+        [string]$FileName
+    )
+
+    $path = "$env:TEMP\$FileName"
+    $json = $JSON_In | ConvertTo-Json -Depth 10 -Compress
+
+    # Create UTF8NoBOM Encoding explicitly
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+    # Write file without BOM
+    [System.IO.File]::WriteAllText($path, $json, $utf8NoBom)
+
+    return $path
+}
+
 ###################################################################################################
 
 
@@ -94,7 +112,7 @@ Write-Host "GETTING USER INPUT"
 Write-Host "==================================="
 
 # First, move to my Project folder
-Set-Location -Path 'C:\Personal\GitHub'
+Set-Location -Path 'C:\Users\nblai\Projects'
 
 # Get User Input for the needed variables for the rest of the script
 # Allow for default values for _some_ variables
@@ -760,7 +778,7 @@ Write-Host " 🆕  Creating new secret in Secrets Manager..."
 $secretID = "${projectName}/secrets-$(New-Random-String)"
 
 # Define key-value pairs as a hashtable
-$secretString = @{
+$secretString = Get-JSON-Path -FileName "secret-string-vars.json" -JSON_In @{
   DB_HOST        = "${rdsHost}"
   DB_DATABASE    = "${dbName}"
   DB_PORT        = "${rdsPort}"
@@ -769,20 +787,20 @@ $secretString = @{
   AWS_REGION     = "${awsRegion}"
   SSL_PEM_BUCKET = "${bucketName}"
   SSL_PEM_KEY    = "${pemFileName}"
-} | ConvertTo-Json -Compress
+}
 
 # Create the secret in Secrets Manager, using the key/value pairs above
 $secretARN = aws secretsmanager create-secret `
   --name $secretID `
   --description "Environment variables for ${projectName}" `
-  --secret-string $secretString | ConvertFrom-Json | Select-Object -ExpandProperty ARN
+  --secret-string file://$secretString | ConvertFrom-Json | Select-Object -ExpandProperty ARN
 
 
 Write-Host "-----------------------------------"
 Write-Host "    CREATING APPRUNNER SERVICE     "
 Write-Host "-----------------------------------"
 
-$sourceConfig = @{
+$sourceConfig = Get-JSON-Path -FileName "apprunner-source-config.json" -JSON_In @{
   ImageRepository             = @{
     ImageIdentifier     = "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:latest"
     ImageConfiguration  = @{
@@ -800,19 +818,19 @@ $sourceConfig = @{
   AuthenticationConfiguration = @{
     AccessRoleArn = "arn:aws:iam::387815262971:role/service-role/AppRunnerECRAccessRole123"
   }
-} | ConvertTo-Json -Depth 10 -Compress
-$instanceConfig = @{
+}
+$instanceConfig = Get-JSON-Path -FileName "apprunner-instance-config.json" -JSON_In @{
   Cpu             = "1 vCPU"
   Memory          = "2 GB"
   InstanceRoleArn = "arn:aws:iam::387815262971:role/apprunner-secret-role"
-} | ConvertTo-Json -Depth 10 -Compress
+}
 
 # Create a new AppRunner service for hosting our site
 $serviceName = "${projectName}-service"
 $serviceOutput = aws apprunner create-service `
   --service-name $serviceName `
-  --source-configuration $sourceConfig `
-  --instance-configuration $instanceConfig `
+  --source-configuration file://$sourceConfig `
+  --instance-configuration file://$instanceConfig `
   --query '{OperationId: OperationId, ServiceUrl: Service.ServiceUrl, ServiceArn: Service.ServiceArn}' | ConvertFrom-Json
 
 $serviceARN = $serviceOutput.ServiceArn
@@ -824,7 +842,7 @@ Write-Host "    CREATING CODEBUILD PROJECT     "
 Write-Host "-----------------------------------"
 
 # Create the policy for allowing the usage of CodeBuild for GH Actions
-$awsCodeBuildAssumeRolePolicy = @{
+$awsCodeBuildAssumeRolePolicy = Get-JSON-Path -FileName "codebuild-assume-role-policy.json" -JSON_In @{
   Version   = "2012-10-17"
   Statement = @(
     @{
@@ -833,14 +851,14 @@ $awsCodeBuildAssumeRolePolicy = @{
       Action    = "sts:AssumeRole"
     }
   )
-} | ConvertTo-Json -Depth 10 -Compress
+}
 
 # Create the policy for what the role is allowed to interact with
 #   CodeDeploy/CodeBuild - allow to call deployments and builds
 #   ECR - allow for reading images from ECR
 #   Logs - Needed to write logs to CloudWatch
 #   Lambda - Needed to update Lambda / create new lambda alias/version
-$awsCodeBuildPolicy = @{
+$awsCodeBuildPolicy = Get-JSON-Path -FileName "codebuild-policy.json" -JSON_In @{
   Version   = "2012-10-17"
   Statement = @(
     @{
@@ -856,7 +874,7 @@ $awsCodeBuildPolicy = @{
       Resource = "*"
     }
   )
-} | ConvertTo-Json -Depth 10 -Compress
+}
 
 # Create the CodeBuild role with the AssumeRole policy created above
 # and extract the ARN of the newly created role
@@ -864,13 +882,13 @@ Write-Host " 🆕  Creating CodeBuild role..."
 $awsCodeBuildRoleName = "codebuild-${projectName}-role"
 $awsCodeBuildRoleArn = aws iam create-role `
   --role-name $awsCodeBuildRoleName `
-  --assume-role-policy-document $awsCodeBuildAssumeRolePolicy | ConvertFrom-Json | Select-Object -ExpandProperty Role | Select-Object -ExpandProperty Arn
+  --assume-role-policy-document file://$awsCodeBuildAssumeRolePolicy | ConvertFrom-Json | Select-Object -ExpandProperty Role | Select-Object -ExpandProperty Arn
   
 # Use the role ARN we just obtained to attach the other policy defined above
 aws iam put-role-policy `
   --role-name $awsCodeBuildRoleName `
   --policy-name "codebuild-${projectName}-policy" `
-  --policy-document $awsCodeBuildPolicy | Out-Null
+  --policy-document file://$awsCodeBuildPolicy | Out-Null
 
 # Wait 10 seconds for the role to be propogated across services
 Write-Host " 😴  Sleeping for 10 seconds..."
@@ -878,21 +896,21 @@ Start-Sleep -Seconds 10
 
 # Define the source for a CodeBuild project, which will point to our newly created
 # GitHub repo to integrate CodeBuild with our GitHub Actions script
-$source = @{
+$source = Get-JSON-Path -FileName "codebuild-project-source.json" -JSON_In @{
   type              = "GITHUB"
   location          = $awsGitHubRepoURL
   reportBuildStatus = $true
-} | ConvertTo-Json -Compress
+}
 
 # Nothing will be generated from the builds, since the images are stored in ECR
 # and its all that's needed
-$artifacts = @{
+$artifacts = Get-JSON-Path -FileName "codebuild-project-artifacts.json" -JSON_In @{
   type = "NO_ARTIFACTS"
-} | ConvertTo-Json -Compress
+}
 
 # Define the environment for the CodeBuild execution, as well as any environment
 # variables needed for the "buildspec.yml" file
-$environment = @{
+$environment = Get-JSON-Path -FileName "codebuild-project-env.json" -JSON_In @{
   type                     = "LINUX_CONTAINER"
   image                    = "aws/codebuild/amazonlinux2-x86_64-standard:5.0"
   computeType              = "BUILD_GENERAL1_SMALL"
@@ -904,15 +922,15 @@ $environment = @{
     @{ name = "dockerContainerName"; value = $projectName; type = "PLAINTEXT" }
     @{ name = "serviceARN"; value = $serviceARN; type = "PLAINTEXT" }
   )
-} | ConvertTo-Json -Depth 10 -Compress
+}
 
 # Create the CodeBuild project, using the above parameters/configurations/roles
 Write-Host " 🆕  Creating CodeBuild project..."
 aws codebuild create-project `
   --name $projectName `
-  --source $source `
-  --artifacts $artifacts `
-  --environment $environment `
+  --source file://$source `
+  --artifacts file://$artifacts `
+  --environment file://$environment `
   --service-role $awsCodeBuildRoleArn | Out-Null
 
 
@@ -920,7 +938,7 @@ Write-Host "-----------------------------------"
 Write-Host "    CREATING CODEDEPLOY PROJECT    "
 Write-Host "-----------------------------------"
 # Create the policy for allowing the usage of CodeDeploy for GH Actions
-$awsCodeDeployAssumeRolePolicyDocument = @{
+$awsCodeDeployAssumeRolePolicyDocument = Get-JSON-Path -FileName "codedeploy-assume-role-policy.json" -JSON_In @{
   Version   = "2012-10-17"
   Statement = @(
     @{
@@ -931,9 +949,9 @@ $awsCodeDeployAssumeRolePolicyDocument = @{
       Action    = "sts:AssumeRole"
     }
   )
-} | ConvertTo-Json -Depth 3
+}
 
-$awsCodeDeployAppRunnerPolicyDocument = @{
+$awsCodeDeployAppRunnerPolicyDocument = Get-JSON-Path -FileName "codedeploy-apprunner-policy.json" -JSON_In @{
   Version   = "2012-10-17"
   Statement = @(
     @{
@@ -944,14 +962,14 @@ $awsCodeDeployAppRunnerPolicyDocument = @{
       Resource = "${serviceARN}"
     }
   )
-} | ConvertTo-Json -Depth 10 -Compress
+}
 
 # Create the CodeDeploy role using the assume role policy above and Extract the role ARN
 $awsCodeDeployRoleName = "codedeploy-${projectName}-role"
 Write-Host " 🆕  Creating CodeDeploy role..."
 $awsCodeDeployRoleArn = aws iam create-role `
   --role-name $awsCodeDeployRoleName `
-  --assume-role-policy-document $awsCodeDeployAssumeRolePolicyDocument | ConvertFrom-Json | Select-Object -ExpandProperty Role | Select-Object -ExpandProperty Arn
+  --assume-role-policy-document file://$awsCodeDeployAssumeRolePolicyDocument | ConvertFrom-Json | Select-Object -ExpandProperty Role | Select-Object -ExpandProperty Arn
 
 # Attach two managed AWS policies to the newly created CodeDeploy role 
 # for interacting with ECR and CodeDeploy (specifically for Lambda)
@@ -963,7 +981,7 @@ aws iam attach-role-policy `
 aws iam put-role-policy `
   --role-name $awsCodeDeployRoleName `
   --policy-name "codedeploy-${projectName}-apprunner-policy" `
-  --policy-document $awsCodeDeployAppRunnerPolicyDocument | Out-Null
+  --policy-document file://$awsCodeDeployAppRunnerPolicyDocument | Out-Null
 
 # Wait 10 seconds for the role to be propogated across services
 Write-Host " 😴  Sleeping for 10 seconds..."
@@ -976,16 +994,16 @@ aws deploy create-application `
   --compute-platform "Lambda" | Out-Null
 
 # Define a deployment group for the CodeDeploy project
-$awsCodeBuildDeployStyle = @{
+$awsCodeBuildDeployStyle = Get-JSON-Path -FileName "codebuild-deploy-style.json" -JSON_In @{
   deploymentType   = "BLUE_GREEN"
   deploymentOption = "WITH_TRAFFIC_CONTROL"
-} | ConvertTo-Json
+}
 Write-Host " 🆕  Creating CodeDeploy deployment group..."
 aws deploy create-deployment-group `
   --application-name "${projectName}-deploy" `
   --deployment-group-name "${projectName}-deploy-group" `
   --service-role-arn $awsCodeDeployRoleArn `
-  --deployment-style $awsCodeBuildDeployStyle | Out-Null
+  --deployment-style file://$awsCodeBuildDeployStyle | Out-Null
 
 
 

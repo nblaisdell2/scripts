@@ -936,10 +936,11 @@ Write-Host " 🚀  Updating secret in AWS Secrets Manager..."
 $updatedSecret = Get-Content $tmpFile -Raw
 aws secretsmanager update-secret `
     --secret-id $secretID `
-    --secret-string "$updatedSecret" | Out-Null
+    --secret-string file://$tmpFile | Out-Null
 
 # Clean up
-Remove-Item $tmpFile
+Write-Host $tmpFile
+# Remove-Item $tmpFile
 
 Write-Host " ✅  Secret updated successfully."
 
