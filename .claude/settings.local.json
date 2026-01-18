@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(.CreateSiteProjectcreate-site-project.ps1 -Force C:UsersnblaiProjects test-project \"test project desc\" testdb testdb123 C:initpath 387815262971 us-east-1 github-actions-create-site-role)",
+      "Bash(powershell -Command:*)"
+    ]
+  }
+}

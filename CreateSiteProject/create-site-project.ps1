@@ -1,6 +1,8 @@
-﻿# Usage: ./create-site-project <project-name> <project-desc> <database-name> <db-password> <db-init-path> <aws-account-id> <aws-region> <gh-actions-role-name>
+﻿# Usage: ./create-site-project <projects-path> <project-name> <project-desc> <database-name> <db-password> <db-init-path> <aws-account-id> <aws-region> <gh-actions-role-name> [-Force]
+# -Force: Recreate existing AWS resources instead of reusing them
 
 param(
+  [string]$projectsPath,
   [string]$projectName,
   [string]$projectDesc,
   [string]$dbName,
@@ -8,7 +10,9 @@ param(
   [string]$dbInitPath,
   [string]$awsAccountID,
   [string]$awsRegion,
-  [string]$awsGHActionRole
+  [string]$awsGHActionRole,
+  [switch]$Force,
+  [switch]$Delete
 )
 
 # Function for accepting user input for the script
@@ -30,7 +34,7 @@ function Get-User-Input {
       $var = Read-Host $msg
     
       while ([string]::IsNullOrWhiteSpace($var)) {
-        Write-Host " ⚠️  $label is required!"
+        Write-LogMessage -Icon ⚠️ -Message "$label is required!"
         $var = Read-Host $msg
       }
     }
@@ -51,17 +55,17 @@ function Wait-ForAWSResource {
     try {
       & $Command | Out-Null
       if ($LASTEXITCODE -eq 0) {
-        Write-Host " ✅  Resource '${ResourceName}' is now available!"
+        Write-LogMessage -Icon ✅ -Message "Resource '${ResourceName}' is now available!"
         break
       }
     }
     catch {
       # Optional: log or handle error
-      Write-Host " ❌  Error finding resource ${ResourceName}!"
+      Write-LogMessage -Icon ❌ -Message "Error finding resource ${ResourceName}!"
       exit 1
     }
-    
-    Write-Host " ⏳  Waiting for resource '${ResourceName}' to be ready..."
+
+    Write-LogMessage -Icon ⏳ -Message "Waiting for resource '${ResourceName}' to be ready..."
     Start-Sleep -Seconds $DelaySeconds
   }
 }
@@ -100,6 +104,68 @@ function Get-JSON-Path {
     return $path
 }
 
+# Function for checking if an AWS resource already exists
+# Returns $true if resource exists, $false otherwise
+function Test-AWSResourceExists {
+  param(
+    [string]$ResourceType,
+    [string]$ResourceName,
+    [ScriptBlock]$CheckCommand
+  )
+
+  try {
+    $result = & $CheckCommand 2>$null
+    if ($LASTEXITCODE -eq 0 -and $result) {
+      Write-LogMessage -Icon ℹ️ -Message "$ResourceType '$ResourceName' already exists"
+      return $true
+    }
+    return $false
+  }
+  catch {
+    return $false
+  }
+}
+
+# Function to check if Docker daemon is running
+function Test-DockerRunning {
+  try {
+    docker info 2>$null | Out-Null
+    return $LASTEXITCODE -eq 0
+  } catch {
+    return $false
+  }
+}
+
+# Function to start Docker Desktop and wait for it to be ready
+function Start-DockerDesktop {
+  $dockerPath = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+  if (Test-Path $dockerPath) {
+    Write-LogMessage -Icon 🐳 -Message "Starting Docker Desktop..."
+    Start-Process $dockerPath
+
+    # Wait for Docker to be ready (up to 60 seconds)
+    $timeout = 60
+    $elapsed = 0
+    while (-not (Test-DockerRunning) -and $elapsed -lt $timeout) {
+      Start-Sleep -Seconds 5
+      $elapsed += 5
+      Write-LogMessage -Icon ⏳ -Message "Waiting for Docker to start... ($elapsed/$timeout seconds)"
+    }
+
+    return Test-DockerRunning
+  }
+  return $false
+}
+
+function Write-LogMessage {
+  param(
+    [string]$Icon,
+    [string]$Message
+  )
+
+  Write-Host " $Icon  $Message"
+}
+
 ###################################################################################################
 
 
@@ -112,7 +178,8 @@ Write-Host "GETTING USER INPUT"
 Write-Host "==================================="
 
 # First, move to my Project folder
-Set-Location -Path 'C:\Users\nblai\Projects'
+Write-LogMessage -Icon 📁 -Message "Moving into local project directory: '$projectsPath'"
+Set-Location -Path $projectsPath
 
 # Get User Input for the needed variables for the rest of the script
 # Allow for default values for _some_ variables
@@ -124,8 +191,8 @@ $projectName = Get-User-Input -var $projectName -label "Project name"
 # }
 
 # If it does, exit here and allow the user to try again with another project name
-if (Test-Path -Path $projectName -PathType Container) {
-  Write-Host " ⚠️  Error: A folder named '$projectName' already exists. Please choose a different name."
+if ((Test-Path -Path $projectName -PathType Container) -and -not $Delete) {
+  Write-LogMessage -Icon ⚠️ -Message "Error: A folder named '$projectName' already exists. Please choose a different name."
   exit 1
 }
 
@@ -150,33 +217,54 @@ Write-Host "==================================="
 Write-Host "CREATING LOCAL REPOSITORY"
 Write-Host "==================================="
 
-# Create a new project using Create-T3-app, providing a best-practice NextJS application
-# https://create.t3.gg/
-#   This project template will be using TypeScript, Tailwind (for CSS/styling), AppRouter (new layouts for NextJS)
-#   and tRPC for end-to-end typescript support for APIs!
-npx create-t3-app@latest $projectName --CI --trpc --tailwind --appRouter --dbProvider postgres
-Write-Host " ✅  Folder '$projectName' created successfully."
+# Check if local project folder already exists
+$localRepoExists = Test-Path -Path $projectName -PathType Container
 
-# Move into the local directory for the rest of the steps
-Write-Host " 📁  Moving into local project directory..."
-Set-Location -Path $projectName
+if ($localRepoExists) {
+  if (-not $Force -and -not $Delete) {
+    Write-LogMessage -Icon ℹ️ -Message "Local folder '$projectName' already exists, reusing..."
+    Write-LogMessage -Icon 📁 -Message "Moving into local project directory..."
+    Set-Location -Path $projectName
+  } else {
+    Write-LogMessage -Icon 🗑️ -Message "Force/Delete flag set - Deleting local repository/folder"
+    Remove-Item -Recurse -Force -Path $projectName
+  }
+} elseif (-not $Delete) {
+  # Create a new project using Create-T3-app, providing a best-practice NextJS application
+  # https://create.t3.gg/
+  #   This project template will be using TypeScript, Tailwind (for CSS/styling), AppRouter (new layouts for NextJS)
+  #   and tRPC for end-to-end typescript support for APIs!
+  npx create-t3-app@latest $projectName --CI --trpc --tailwind --appRouter --dbProvider postgres
+  Write-LogMessage -Icon ✅ -Message "Folder '$projectName' created successfully."
 
-# Install extra npm libraries/packages
-npm install @aws-sdk/client-secrets-manager @aws-sdk/client-s3 pg
-npm install -D @types/pg
+  # Move into the local directory for the rest of the steps
+  Write-LogMessage -Icon 📁 -Message "Moving into local project directory..."
+  Set-Location -Path $projectName
+
+  # Install extra npm libraries/packages
+  Write-LogMessage -Icon "  🛠️" -Message "Installing additionall npm packages..."
+  npm install @aws-sdk/client-secrets-manager @aws-sdk/client-s3 pg | Out-Null
+  npm install -D @types/pg | Out-Null
+}
+
+# Only create project files if this is a new project
+if (-not $localRepoExists -and -not $Delete) {
 
 # Add the Dockerfile necessary for containerizing the application
 # Sourced from: https://create.t3.gg/en/deployment/docker#3-create-dockerfile
+Write-LogMessage -Icon "  🆕" -Message "Creating 'Dockerfile' file"
 @'
 ##### DEPENDENCIES
 
-FROM --platform=linux/amd64 node:20-alpine AS deps
+ARG TARGETPLATFORM=linux/amd64
+
+FROM --platform=$TARGETPLATFORM node:20-alpine AS deps
 RUN apk add --no-cache libc6-compat openssl
 WORKDIR /app
 
 # Install dependencies based on the preferred package manager
 
-COPY package.json yarn.lock* package-lock.json* pnpm-lock.yaml\* ./
+COPY package.json yarn.lock* package-lock.json* pnpm-lock.yaml* ./
 
 RUN \
     if [ -f yarn.lock ]; then yarn --frozen-lockfile; \
@@ -187,7 +275,7 @@ RUN \
 
 ##### BUILDER
 
-FROM --platform=linux/amd64 node:20-alpine AS builder
+FROM --platform=$TARGETPLATFORM node:20-alpine AS builder
 ARG DATABASE_URL
 ARG NEXT_PUBLIC_CLIENTVAR
 WORKDIR /app
@@ -205,10 +293,10 @@ RUN \
 
 ##### RUNNER
 
-FROM --platform=linux/amd64 gcr.io/distroless/nodejs20-debian12 AS runner
+FROM --platform=$TARGETPLATFORM gcr.io/distroless/nodejs20-debian12 AS runner
 WORKDIR /app
 
-ENV NODE_ENV production
+ENV NODE_ENV=production
 
 # ENV NEXT_TELEMETRY_DISABLED 1
 
@@ -224,13 +312,14 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 
 EXPOSE 3000
-ENV PORT 3000
+ENV PORT=3000
 
 CMD ["server.js"]
 '@ | Set-Content -Path "Dockerfile"
 
 # Add the .dockerignore necessary for containerizing the application
 # Sourced from: https://create.t3.gg/en/deployment/docker#2-create-dockerignore-file
+Write-LogMessage -Icon "  🆕" -Message "Creating '.dockerignore' file"
 @'
 .env
 Dockerfile
@@ -244,6 +333,7 @@ README.md
 
 # Add the "standalone" property to the NextJS configuration for the application,
 # necessary for the Dockerfile, created above
+Write-LogMessage -Icon "  🆕" -Message "Creating 'next.config.js' file"
 Remove-Item "next.config.js"
 @'
 /**
@@ -269,6 +359,7 @@ if (-not (Test-Path $folderPath)) {
   New-Item -ItemType Directory -Path $folderPath -Force | Out-Null
 }
 
+Write-LogMessage -Icon "  🆕" -Message "Creating '$folderPath/db.ts' file"
 @'
 import type { QueryResultRow } from "pg";
 import { Pool } from "pg";
@@ -397,9 +488,10 @@ export async function exec<TResult extends QueryResultRow>(
 }
 '@ | Set-Content -Path "$folderPath/db.ts"
 
-Write-Host " 📁  Moving into project src directory..."
+Write-LogMessage -Icon 📁 -Message "Moving into project 'src' directory..."
 Set-Location -Path "src"
 
+Write-LogMessage -Icon "  🆕" -Message "Creating 'env.js' file"
 Remove-Item "env.js"
 @'
 import { createEnv } from "@t3-oss/env-nextjs";
@@ -460,8 +552,10 @@ export const env = createEnv({
 });
 '@ | Set-Content -Path "env.js"
 
-Write-Host " 📁  Moving back into project directory..."
+Write-LogMessage -Icon 📁 -Message "Moving back into project directory..."
 Set-Location ..
+
+} # End of if (-not $localRepoExists)
 
 
 
@@ -472,23 +566,51 @@ Write-Host "==================================="
 Write-Host "CREATING GITHUB REPOSITORY"
 Write-Host "==================================="
 
-# Use GitHub CLI to create a new GitHub repo using the Fastify template
-# and clone the new repo into the local repo folder we just created
-Write-Host " 🆕  Creating GitHub Repo..."
-gh repo create $projectName `
-  --description $projectDesc `
-  --public | Out-Null
+$awsAccount = gh api user -q ".login" 2>$null
+$awsProject = "${awsAccount}/${projectName}"
+$awsGitHubRepoURL = "https://github.com/${awsProject}.git"
 
-# Since we're not cloning a repo, we'll need to add the remote directly here
-# so that we can add the secrets in the next step
-$awsGitHubRepoURL = "https://github.com/nblaisdell2/${projectName}.git"
-git remote add origin $awsGitHubRepoURL
+# Check if GitHub repo already exists
+$ghRepoExists = $false
+try {
+  gh repo view $awsProject 2>$null | Out-Null
+  if ($LASTEXITCODE -eq 0) {
+    $ghRepoExists = $true
+    Write-LogMessage -Icon ℹ️ -Message "GitHub repo '${awsProject}' already exists"
+  }
+} catch { }
 
-# Add necessary secrets for accessing CodeBuild via GitHub Actions
-Write-Host " 🔐  Setting GitHub Secrets..."
-gh secret set AWS_REGION -b $awsRegion | Out-Null
-gh secret set AWS_ACCOUNT_ID -b $awsAccountID | Out-Null
-gh secret set AWS_GHACTIONS_ROLENAME -b $awsGHActionRole | Out-Null
+if ($ghRepoExists -and ($Force -or $Delete)) {
+  Write-LogMessage -Icon 🗑️ -Message "Deleting GitHub repo '${awsProject}'..."
+  gh repo delete $awsProject --yes | Out-Null
+  $ghRepoExists = $false
+}
+
+if (-not $ghRepoExists -and -not $Delete) {
+  # Use GitHub CLI to create a new GitHub repo
+  Write-LogMessage -Icon 🆕 -Message "Creating GitHub Repo..."
+  gh repo create $projectName `
+    --description $projectDesc `
+    --public | Out-Null
+}
+
+if (-not $Delete) {
+  # Ensure remote is set up (add if not exists, or skip if already there)
+  $existingRemote = git remote get-url origin 2>$null
+  if (-not $existingRemote) {
+    Write-LogMessage -Icon 🔗 -Message "Adding git remote origin..."
+    git remote add origin $awsGitHubRepoURL
+  } else {
+    Write-LogMessage -Icon ℹ️ -Message "Git remote origin already configured"
+  }
+  
+  # Add necessary secrets for accessing CodeBuild via GitHub Actions
+  # (gh secret set is idempotent - it will update if exists)
+  Write-LogMessage -Icon 🔐 -Message "Setting GitHub Secrets..."
+  gh secret set AWS_REGION -b $awsRegion | Out-Null
+  gh secret set AWS_ACCOUNT_ID -b $awsAccountID | Out-Null
+  gh secret set AWS_GHACTIONS_ROLENAME -b $awsGHActionRole | Out-Null
+}
 
 
 
@@ -499,25 +621,63 @@ Write-Host "==================================="
 Write-Host "SETTING UP TERRAFORM"
 Write-Host "==================================="
 
-# Create "/.terraform" folder
-Write-Host " 🆕  Creating '/.terraform' folder..."
-New-Item -ItemType Directory -Path '.terraform' | Out-Null
+# Check if RDS instance already exists
+$dbInstanceIdentifier = "postgres-${projectName}"
+$rdsUser = "postgres"
 
-# Move into the "/.terraform" folder to perform Terraform actions for the project
-Write-Host " 📁  Moving into Terraform directory..."
-Set-Location -Path ".terraform"
+$rdsInstanceExists = Test-AWSResourceExists -ResourceType "RDS Instance" -ResourceName $dbInstanceIdentifier -CheckCommand {
+  aws rds describe-db-instances --db-instance-identifier $dbInstanceIdentifier
+}
 
-# NOTE: 
-#   The pattern below takes slightly more time, but makes startup of a new project much simpler.
-#   If I define a snapshot for a database instance that's never existed, Terraform will give an error
-#   So, to fix this, I'll create the instance *without* the snapshot, immediately destroy the instance,
-#   which will trigger RDS to create a snapshot before destruction, and then I'll immedidately re-create
-#   the instance using the snapshot.
-#   That way, the user can start immediately and will be able to destroy the instance on their own behalf
-#   without worrying about losing data
+# If RDS exists and not forcing, get endpoint and skip Terraform
+if ($rdsInstanceExists -and -not ($Force -or $Delete)) {
+  Write-LogMessage -Icon ⏭️ -Message "Skipping Terraform setup - RDS instance already exists"
 
+  # Get endpoint from existing instance
+  $existingDb = aws rds describe-db-instances --db-instance-identifier $dbInstanceIdentifier | ConvertFrom-Json
+  $rdsHost = $existingDb.DBInstances[0].Endpoint.Address
+  $rdsPort = $existingDb.DBInstances[0].Endpoint.Port
+
+  Write-LogMessage -Icon ℹ️ -Message "Using existing RDS endpoint: ${rdsHost}:${rdsPort}"
+} else {
+  # If forcing and exists, delete the existing RDS instance first
+  if ($rdsInstanceExists -and ($Force -or $Delete)) {
+    Write-LogMessage -Icon 🗑️ -Message "Force/Delete flag set - Deleting existing RDS instance..."
+    # Delete the RDS instance (skip final snapshot to speed up deletion)
+    aws rds delete-db-instance `
+      --db-instance-identifier $dbInstanceIdentifier `
+      --skip-final-snapshot `
+      --delete-automated-backups | Out-Null
+
+    # Wait for the instance to be fully deleted
+    Write-LogMessage -Icon ⏳ -Message "Waiting for RDS instance to be deleted (this may take several minutes)..."
+    aws rds wait db-instance-deleted --db-instance-identifier $dbInstanceIdentifier | Out-Null
+
+    Write-LogMessage -Icon ✅ -Message "RDS instance deleted successfully"
+  }
+
+  if (-not $Delete) {
+    # Create "/.terraform" folder
+    if (-not (Test-Path '.terraform')) {
+      Write-LogMessage -Icon 🆕 -Message "Creating '/.terraform' folder..."
+      New-Item -ItemType Directory -Path '.terraform' | Out-Null
+    }
+  
+    # Move into the "/.terraform" folder to perform Terraform actions for the project
+    Write-LogMessage -Icon 📁 -Message "Moving into Terraform directory..."
+    Set-Location -Path ".terraform"
+  
+    # NOTE:
+    #   The pattern below takes slightly more time, but makes startup of a new project much simpler.
+    #   If I define a snapshot for a database instance that's never existed, Terraform will give an error
+    #   So, to fix this, I'll create the instance *without* the snapshot, immediately destroy the instance,
+    #   which will trigger RDS to create a snapshot before destruction, and then I'll immedidately re-create
+    #   the instance using the snapshot.
+    #   That way, the user can start immediately and will be able to destroy the instance on their own behalf
+    #   without worrying about losing data
+  
 # Create main.tf file (*without* data resource for snapshot)
-Write-Host " 🆕  Creating main.tf folder (defining PostgreSQL RDS instance)..."
+Write-LogMessage -Icon "  🆕" -Message "Creating 'main.tf' file (defining PostgreSQL RDS instance)..." 
 @'
 terraform {
   required_providers {
@@ -626,8 +786,7 @@ output "out_db_endpoint" {
 '@ | Set-Content -Path "main.tf"
 
 # Create terraform.tfvars file to securely store variables for main.tf Terraform script
-Write-Host " 🆕  Creating terraform.tfvars file..."
-$dbInstanceIdentifier = "postgres-${projectName}"
+Write-LogMessage -Icon "  🆕" -Message "Creating terraform.tfvars file..."
 @"
 db_identifier       = "${dbInstanceIdentifier}"
 db_pass             = "${dbPass}"
@@ -641,25 +800,24 @@ project_name    = "${projectName}"
 "@ | Set-Content -Path "terraform.tfvars"
 
 # Run Terraform commands to initialize and provision RDS database
-Write-Host " 🎬  Initialize Terraform..."
+Write-LogMessage -Icon 🎬 -Message "Initializing Terraform..."
 terraform init | Out-Null
-Write-Host " 🆕  Creating PostgreSQL instance..."
-terraform apply -auto-approve | Out-Null
+Write-LogMessage -Icon 🆕 -Message "Creating PostgreSQL instance..."
+terraform apply -auto-approve | Out-Null 
 
 # Obtain output variables for RDS db
 $terraformOutput = terraform output -json | ConvertFrom-Json
 $endpoint = $terraformOutput.out_db_endpoint.value
 
-# Split endpoint into host & port 
+# Split endpoint into host & port
 #   value is returned in format: "{host}:{port}"
 $parts = $endpoint -split ":"
 $rdsHost = $parts[0]
 $rdsPort = $parts[1]
-$rdsUser = "postgres"
 
 # Run terraform destroy to remove the newly created instance, 
 # which will also trigger RDS to generate a snapshot for us
-Write-Host " ❌  Destroying PostgreSQL instance..."
+Write-LogMessage -Icon ❌ -Message "Destroying PostgreSQL instance..."
 terraform destroy -auto-approve | Out-Null
 
 # Re-create terraform.tfvars file (use_latest_snapshot = true)
@@ -677,12 +835,15 @@ project_name    = "${projectName}"
 "@ | Set-Content -Path "terraform.tfvars"
 
 # Re-run terraform apply to bring the database instance back, using the snapshot going forward
-Write-Host " 🆕  Re-creating PostgreSQL instance..."
+Write-LogMessage -Icon ⬆️ -Message "Re-creating PostgreSQL instance..."
 terraform apply -auto-approve | Out-Null
 
 # Move back into the project's root directory for the rest of the project setup
-Write-Host " 📁  Moving back to project root directory..."
+Write-LogMessage -Icon 📁 -Message "Moving back to project root directory..."
 Set-Location ..
+} # End of else block for (-not $Delete)
+  } # End of else block for Terraform setup
+  
 
 
 
@@ -693,19 +854,23 @@ Write-Host "==================================="
 Write-Host "INITIALIZING DATABASE"
 Write-Host "==================================="
 
-if (-not (Test-Path $dbInitPath)) {
-  Write-Host "No database init script found at '$dbInitPath'. Skipping..."
-}
-else {
-  # Wait 10 seconds to give the RDS instance some time when coming online
-  Write-Host " 😴  Sleeping for 10 seconds..."
-  Start-Sleep -Seconds 10
-    
-  # Initialize the database with a SQL initialization script, for defining tables/functions/etc.
-  Write-Host " 🎬  Initializing database..."
-  $env:PGPASSWORD = $dbPass
-  psql -h $rdsHost -p 5432 -U $rdsUser -d $dbName -f $dbInitPath
-  Remove-Item Env:PGPASSWORD
+if (-not $Delete) {
+  # Only initialize database if RDS was newly created (not reusing existing)
+  if ($rdsInstanceExists -and -not $Force) {
+    Write-LogMessage -Icon ⏭️ -Message "Skipping database initialization - using existing RDS instance"
+  } elseif (-not (Test-Path $dbInitPath)) {
+    Write-LogMessage -Icon 🤷 -Message "No database init script found at '$dbInitPath'. Skipping..."
+  } else {
+    # Wait 10 seconds to give the RDS instance some time when coming online
+    Write-LogMessage -Icon 😴 -Message "Sleeping for 10 seconds..."
+    Start-Sleep -Seconds 10
+  
+    # Initialize the database with a SQL initialization script, for defining tables/functions/etc.
+    Write-LogMessage -Icon 🎬 -Message "Initializing database..."
+    $env:PGPASSWORD = $dbPass
+    psql -h $rdsHost -p 5432 -U $rdsUser -d $dbName -f $dbInitPath
+    Remove-Item Env:PGPASSWORD
+  }
 }
 
 
@@ -721,50 +886,86 @@ Write-Host "      CONNECTING TO AWS ECR        "
 Write-Host "-----------------------------------"
 
 # login to ECR for Docker
-Write-Host " 🔑  Logging into ECR..."
-aws ecr get-login-password --region $awsRegion | docker login --username "AWS" --password-stdin "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com" | Out-Null
+Write-LogMessage -Icon 🔑 -Message "Logging into ECR..."
+cmd /c "aws ecr get-login-password --region $awsRegion | docker login --username AWS --password-stdin ${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com" | Out-Null
+# aws ecr get-login-password --region $awsRegion | docker login --username "AWS" --password-stdin "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com" | Out-Null
 
 # Create a new repository within ECR for this new project's Docker images
-Write-Host " 🆕  Creating ECR Repository..."
-aws ecr create-repository `
-  --repository-name $projectName `
-  --image-scanning-configuration "scanOnPush=true" `
-  --image-tag-mutability "MUTABLE" | Out-Null
+$ecrExists = Test-AWSResourceExists -ResourceType "ECR Repository" -ResourceName $projectName -CheckCommand {
+  aws ecr describe-repositories --repository-names $projectName
+}
+
+if ($ecrExists -and ($Force -or $Delete)) {
+  Write-LogMessage -Icon 🗑️ -Message "Deleting ECR repository '$projectName'..."
+  aws ecr delete-repository --repository-name $projectName --force | Out-Null
+  $ecrExists = $false
+}
+
+if (-not $ecrExists -and -not $Delete) {
+  Write-LogMessage -Icon 🆕 -Message "Creating ECR Repository..."
+  aws ecr create-repository `
+    --repository-name $projectName `
+    --image-scanning-configuration "scanOnPush=true" `
+    --image-tag-mutability "MUTABLE" | Out-Null
+}
 
 
 Write-Host "-----------------------------------"
 Write-Host "     BUILDING DOCKER CONTAINER     "
 Write-Host "-----------------------------------"
 
-# Build the Docker container and set it up (tag the container) 
-# to get ready to be uploaded to ECR. Then, push to ECR.
-Write-Host " 🛠️   Building container..."
-docker build -t "${projectName}:latest" . | Out-Null
-Write-Host " 🏷️   Tagging container..."
-docker tag "${projectName}:latest" "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:latest" | Out-Null
-Write-Host " 🚀  Pushing container to ECR..."
-docker push "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:latest" | Out-Null
+if (-not $Delete) {
+  # Check if Docker is running, attempt to start if not
+  if (-not (Test-DockerRunning)) {
+    Write-LogMessage -Icon ⚠️ -Message "Docker is not running. Attempting to start Docker Desktop..."
+  
+    if (-not (Start-DockerDesktop)) {
+      Write-LogMessage -Icon ❌ -Message "Failed to start Docker. Please start Docker Desktop manually and re-run the script."
+      exit 1
+    }
+
+    Write-LogMessage -Icon ✅ -Message "Docker is now running!"
+  }
+  
+  # Build the Docker container and set it up (tag the container)
+  # to get ready to be uploaded to ECR. Then, push to ECR.
+  Write-LogMessage -Icon 🛠️ -Message "Building container..."
+  docker build -t "${projectName}:latest" . | Out-Null
+  Write-LogMessage -Icon 🏷️ -Message "Tagging container..."
+  docker tag "${projectName}:latest" "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:latest" | Out-Null
+  Write-LogMessage -Icon 🚀 -Message "Pushing container to ECR..."
+  docker push "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:latest" | Out-Null
+
+  # Clean up local Docker images to save space and 
+  # release any handles for clean deletion of local repo later
+  Write-LogMessage -Icon 🧹 -Message "Cleaning up local Docker images..."
+  docker system prune -f | Out-Null
+}
 
 
 Write-Host "-----------------------------------"
 Write-Host "        CREATING S3 BUCKET         "
 Write-Host "-----------------------------------"
 
-# Download RDS certificate for connecting to instance via SSL
-$pemSource = "https://truststore.pki.rds.amazonaws.com/${awsRegion}/${awsRegion}-bundle.pem"
-$pemFileName = "${awsRegion}-bundle.pem"
-
-Invoke-WebRequest -Uri $pemSource -OutFile $pemFileName
-
-# Create S3 bucket for project and place the .pem file in the bucket
-$bucketName = "${projectName}-$(New-Random-String)"
-aws s3api create-bucket `
-  --bucket $bucketName `
-  --region $awsRegion | Out-Null
-
-aws s3 cp $pemFileName s3://$bucketName/ | Out-Null
-
-Remove-Item $pemFileName
+if (-not $Delete) {
+  # Download RDS certificate for connecting to instance via SSL
+  $pemFileName = "${awsRegion}-bundle.pem"
+  $pemSource = "https://truststore.pki.rds.amazonaws.com/${awsRegion}/${pemFileName}"
+  
+  Write-LogMessage -Icon 🛠️ -Message "Downloading RDS certificate..."
+  Invoke-WebRequest -Uri $pemSource -OutFile $pemFileName
+  
+  # Create S3 bucket for project and place the .pem file in the bucket
+  $bucketName = "${projectName}-$(New-Random-String)"
+  aws s3api create-bucket `
+    --bucket $bucketName `
+    --region $awsRegion | Out-Null
+    
+  Write-LogMessage -Icon 🆕 -Message "Creating S3 bucket..."
+  aws s3 cp $pemFileName s3://$bucketName/ | Out-Null
+  
+  Remove-Item $pemFileName
+}
 
 Write-Host "-----------------------------------"
 Write-Host "     CREATING SECRETS MANAGER      "
@@ -772,69 +973,128 @@ Write-Host "-----------------------------------"
 
 # Create a secrets repository within Secrets Manager to house our environment variables
 # for the project, rather than storing them in plaintext on the Lambda itself
-Write-Host " 🆕  Creating new secret in Secrets Manager..."
 
-# Generate a name for the secrets
-$secretID = "${projectName}/secrets-$(New-Random-String)"
+# Check if a secret with the project prefix already exists
+$existingSecret = aws secretsmanager list-secrets `
+  --query "SecretList[?starts_with(Name, '${projectName}/secrets-')] | [0]" `
+  --output json 2>$null | ConvertFrom-Json
 
-# Define key-value pairs as a hashtable
-$secretString = Get-JSON-Path -FileName "secret-string-vars.json" -JSON_In @{
-  DB_HOST        = "${rdsHost}"
-  DB_DATABASE    = "${dbName}"
-  DB_PORT        = "${rdsPort}"
-  DB_USER        = "${rdsUser}"
-  DB_PASS        = "${dbPass}"
-  AWS_REGION     = "${awsRegion}"
-  SSL_PEM_BUCKET = "${bucketName}"
-  SSL_PEM_KEY    = "${pemFileName}"
+$secretExists = $null -ne $existingSecret -and $existingSecret -ne "null"
+
+if ($secretExists) {
+  $secretID = $existingSecret.Name
+  $secretARN = $existingSecret.ARN
+  Write-LogMessage -Icon ℹ️ -Message "Secrets Manager secret '$secretID' already exists"
 }
 
-# Create the secret in Secrets Manager, using the key/value pairs above
-$secretARN = aws secretsmanager create-secret `
-  --name $secretID `
-  --description "Environment variables for ${projectName}" `
-  --secret-string file://$secretString | ConvertFrom-Json | Select-Object -ExpandProperty ARN
+if ($secretExists -and ($Force -or $Delete)) {
+  Write-LogMessage -Icon 🗑️ -Message "Deleting secret '$secretID'..."
+  aws secretsmanager delete-secret --secret-id $secretID --force-delete-without-recovery | Out-Null
+  Start-Sleep -Seconds 2
+  $secretExists = $false
+  $secretID = "${projectName}/secrets-$(New-Random-String)"
+}
+
+if (-not $Delete) {
+  # Define key-value pairs as a hashtable
+  $secretString = Get-JSON-Path -FileName "secret-string-vars.json" -JSON_In @{
+    DB_HOST        = "${rdsHost}"
+    DB_DATABASE    = "${dbName}"
+    DB_PORT        = "${rdsPort}"
+    DB_USER        = "${rdsUser}"
+    DB_PASS        = "${dbPass}"
+    AWS_REGION     = "${awsRegion}"
+    SSL_PEM_BUCKET = "${bucketName}"
+    SSL_PEM_KEY    = "${pemFileName}"
+  }
+  
+  if (-not $secretExists) {
+    # Generate a name for the secrets
+    if (-not $secretID) {
+      $secretID = "${projectName}/secrets-$(New-Random-String)"
+    }
+
+    Write-LogMessage -Icon 🆕 -Message "Creating new secret in Secrets Manager..."
+    # Create the secret in Secrets Manager, using the key/value pairs above
+    $secretARN = aws secretsmanager create-secret `
+      --name $secretID `
+      --description "Environment variables for ${projectName}" `
+      --secret-string file://$secretString | ConvertFrom-Json | Select-Object -ExpandProperty ARN
+  } else {
+    # Update existing secret with new values
+    Write-LogMessage -Icon 🔄 -Message "Updating existing secret..."
+    aws secretsmanager update-secret `
+      --secret-id $secretID `
+      --secret-string file://$secretString | Out-Null
+  }
+}
 
 
 Write-Host "-----------------------------------"
 Write-Host "    CREATING APPRUNNER SERVICE     "
 Write-Host "-----------------------------------"
 
-$sourceConfig = Get-JSON-Path -FileName "apprunner-source-config.json" -JSON_In @{
-  ImageRepository             = @{
-    ImageIdentifier     = "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:latest"
-    ImageConfiguration  = @{
-      Port                        = "3000"
-      RuntimeEnvironmentVariables = @{
-        "HOSTNAME" = "0.0.0.0"
-      }
-      RuntimeEnvironmentSecrets   = @{
-        "SECRET_ID" = "$secretARN"
-      }
-    }
-    ImageRepositoryType = "ECR"
-  }
-  AutoDeploymentsEnabled      = $false
-  AuthenticationConfiguration = @{
-    AccessRoleArn = "arn:aws:iam::387815262971:role/service-role/AppRunnerECRAccessRole123"
-  }
-}
-$instanceConfig = Get-JSON-Path -FileName "apprunner-instance-config.json" -JSON_In @{
-  Cpu             = "1 vCPU"
-  Memory          = "2 GB"
-  InstanceRoleArn = "arn:aws:iam::387815262971:role/apprunner-secret-role"
-}
-
-# Create a new AppRunner service for hosting our site
 $serviceName = "${projectName}-service"
-$serviceOutput = aws apprunner create-service `
-  --service-name $serviceName `
-  --source-configuration file://$sourceConfig `
-  --instance-configuration file://$instanceConfig `
-  --query '{OperationId: OperationId, ServiceUrl: Service.ServiceUrl, ServiceArn: Service.ServiceArn}' | ConvertFrom-Json
 
-$serviceARN = $serviceOutput.ServiceArn
-$serviceURL = $serviceOutput.ServiceUrl
+# Check if AppRunner service already exists
+$existingService = aws apprunner list-services `
+  --query "ServiceSummaryList[?ServiceName=='${serviceName}'] | [0]" `
+  --output json 2>$null | ConvertFrom-Json
+
+$appRunnerExists = $null -ne $existingService -and $existingService -ne "null"
+
+if ($appRunnerExists) {
+  $serviceARN = $existingService.ServiceArn -replace '//', '/'
+  $serviceURL = $existingService.ServiceUrl
+  Write-LogMessage -Icon ℹ️ -Message "AppRunner service '$serviceName' already exists (${serviceARN})"
+
+  if ($Force -or $Delete) {
+    Write-LogMessage -Icon 🗑️ -Message "Deleting AppRunner service '$serviceName'..."
+    aws apprunner delete-service --service-arn $serviceARN | Out-Null
+    # Wait for service to be deleted
+    Write-LogMessage -Icon ⏳ -Message "Waiting for service deletion..."
+    Start-Sleep -Seconds 30
+    $appRunnerExists = $false
+  }
+}
+
+if (-not $appRunnerExists -and -not $Delete) {
+  $sourceConfig = Get-JSON-Path -FileName "apprunner-source-config.json" -JSON_In @{
+    ImageRepository             = @{
+      ImageIdentifier     = "${awsAccountID}.dkr.ecr.${awsRegion}.amazonaws.com/${projectName}:latest"
+      ImageConfiguration  = @{
+        Port                        = "3000"
+        RuntimeEnvironmentVariables = @{
+          "HOSTNAME" = "0.0.0.0"
+        }
+        RuntimeEnvironmentSecrets   = @{
+          "SECRET_ID" = "$secretARN"
+        }
+      }
+      ImageRepositoryType = "ECR"
+    }
+    AutoDeploymentsEnabled      = $false
+    AuthenticationConfiguration = @{
+      AccessRoleArn = "arn:aws:iam::387815262971:role/service-role/AppRunnerECRAccessRole123"
+    }
+  }
+  $instanceConfig = Get-JSON-Path -FileName "apprunner-instance-config.json" -JSON_In @{
+    Cpu             = "1 vCPU"
+    Memory          = "2 GB"
+    InstanceRoleArn = "arn:aws:iam::387815262971:role/apprunner-secret-role"
+  }
+
+  # Create a new AppRunner service for hosting our site
+  Write-LogMessage -Icon 🆕 -Message "Creating AppRunner service..."
+  $serviceOutput = aws apprunner create-service `
+    --service-name $serviceName `
+    --source-configuration file://$sourceConfig `
+    --instance-configuration file://$instanceConfig `
+    --query '{OperationId: OperationId, ServiceUrl: Service.ServiceUrl, ServiceArn: Service.ServiceArn}' | ConvertFrom-Json
+
+  $serviceARN = $serviceOutput.ServiceArn
+  $serviceURL = $serviceOutput.ServiceUrl
+}
 
 
 Write-Host "-----------------------------------"
@@ -878,21 +1138,41 @@ $awsCodeBuildPolicy = Get-JSON-Path -FileName "codebuild-policy.json" -JSON_In @
 
 # Create the CodeBuild role with the AssumeRole policy created above
 # and extract the ARN of the newly created role
-Write-Host " 🆕  Creating CodeBuild role..."
 $awsCodeBuildRoleName = "codebuild-${projectName}-role"
-$awsCodeBuildRoleArn = aws iam create-role `
-  --role-name $awsCodeBuildRoleName `
-  --assume-role-policy-document file://$awsCodeBuildAssumeRolePolicy | ConvertFrom-Json | Select-Object -ExpandProperty Role | Select-Object -ExpandProperty Arn
-  
-# Use the role ARN we just obtained to attach the other policy defined above
-aws iam put-role-policy `
-  --role-name $awsCodeBuildRoleName `
-  --policy-name "codebuild-${projectName}-policy" `
-  --policy-document file://$awsCodeBuildPolicy | Out-Null
 
-# Wait 10 seconds for the role to be propogated across services
-Write-Host " 😴  Sleeping for 10 seconds..."
-Start-Sleep -Seconds 10
+$codeBuildRoleExists = Test-AWSResourceExists -ResourceType "IAM Role" -ResourceName $awsCodeBuildRoleName -CheckCommand {
+  aws iam get-role --role-name $awsCodeBuildRoleName
+}
+
+if ($codeBuildRoleExists) {
+  $awsCodeBuildRoleArn = (aws iam get-role --role-name $awsCodeBuildRoleName | ConvertFrom-Json).Role.Arn
+}
+
+if ($codeBuildRoleExists -and ($Force -or $Delete)) {
+  Write-LogMessage -Icon 🗑️ -Message "Deleting CodeBuild role '$awsCodeBuildRoleName'..."
+  # Delete inline policies first
+  aws iam delete-role-policy --role-name $awsCodeBuildRoleName --policy-name "codebuild-${projectName}-policy" 2>$null
+  aws iam delete-role --role-name $awsCodeBuildRoleName | Out-Null
+  $codeBuildRoleExists = $false
+}
+
+if (-not $codeBuildRoleExists -and -not $Delete) {
+  Write-LogMessage -Icon 🆕 -Message "Creating CodeBuild role..."
+  $awsCodeBuildRoleArn = aws iam create-role `
+    --role-name $awsCodeBuildRoleName `
+    --assume-role-policy-document file://$awsCodeBuildAssumeRolePolicy | ConvertFrom-Json | Select-Object -ExpandProperty Role | Select-Object -ExpandProperty Arn
+    
+  # Use the role ARN we just obtained to attach the other policy defined above
+  # (put-role-policy is idempotent - it will update if exists)
+  aws iam put-role-policy `
+    --role-name $awsCodeBuildRoleName `
+    --policy-name "codebuild-${projectName}-policy" `
+    --policy-document file://$awsCodeBuildPolicy | Out-Null
+
+  # Wait 10 seconds for the role to be propogated across services (only if newly created)
+  Write-LogMessage -Icon 😴 -Message "Sleeping for 10 seconds..."
+  Start-Sleep -Seconds 10
+}
 
 # Define the source for a CodeBuild project, which will point to our newly created
 # GitHub repo to integrate CodeBuild with our GitHub Actions script
@@ -925,13 +1205,36 @@ $environment = Get-JSON-Path -FileName "codebuild-project-env.json" -JSON_In @{
 }
 
 # Create the CodeBuild project, using the above parameters/configurations/roles
-Write-Host " 🆕  Creating CodeBuild project..."
-aws codebuild create-project `
-  --name $projectName `
-  --source file://$source `
-  --artifacts file://$artifacts `
-  --environment file://$environment `
-  --service-role $awsCodeBuildRoleArn | Out-Null
+$codeBuildProjectExists = Test-AWSResourceExists -ResourceType "CodeBuild Project" -ResourceName $projectName -CheckCommand {
+  $result = aws codebuild batch-get-projects --names $projectName | ConvertFrom-Json
+  if ($result.projects.Count -gt 0) { return $true } else { return $null }
+}
+
+if ($codeBuildProjectExists -and ($Force -or $Delete)) {
+  Write-LogMessage -Icon 🗑️ -Message "Deleting CodeBuild project '$projectName'..."
+  aws codebuild delete-project --name $projectName | Out-Null
+  $codeBuildProjectExists = $false
+}
+
+if (-not $Delete) {
+  if (-not $codeBuildProjectExists) {
+    Write-LogMessage -Icon 🆕 -Message "Creating CodeBuild project..."
+    aws codebuild create-project `
+      --name $projectName `
+      --source file://$source `
+      --artifacts file://$artifacts `
+      --environment file://$environment `
+      --service-role $awsCodeBuildRoleArn | Out-Null
+  } else {
+    Write-LogMessage -Icon 🔄 -Message "Updating CodeBuild project..."
+    aws codebuild update-project `
+      --name $projectName `
+      --source file://$source `
+      --artifacts file://$artifacts `
+      --environment file://$environment `
+      --service-role $awsCodeBuildRoleArn | Out-Null
+  }
+}
 
 
 Write-Host "-----------------------------------"
@@ -966,44 +1269,94 @@ $awsCodeDeployAppRunnerPolicyDocument = Get-JSON-Path -FileName "codedeploy-appr
 
 # Create the CodeDeploy role using the assume role policy above and Extract the role ARN
 $awsCodeDeployRoleName = "codedeploy-${projectName}-role"
-Write-Host " 🆕  Creating CodeDeploy role..."
-$awsCodeDeployRoleArn = aws iam create-role `
-  --role-name $awsCodeDeployRoleName `
-  --assume-role-policy-document file://$awsCodeDeployAssumeRolePolicyDocument | ConvertFrom-Json | Select-Object -ExpandProperty Role | Select-Object -ExpandProperty Arn
 
-# Attach two managed AWS policies to the newly created CodeDeploy role 
-# for interacting with ECR and CodeDeploy (specifically for Lambda)
-aws iam attach-role-policy `
-  --role-name $awsCodeDeployRoleName `
-  --policy-arn "arn:aws:iam::aws:policy/AmazonElasticContainerRegistryPublicFullAccess" | Out-Null
+$codeDeployRoleExists = Test-AWSResourceExists -ResourceType "IAM Role" -ResourceName $awsCodeDeployRoleName -CheckCommand {
+  aws iam get-role --role-name $awsCodeDeployRoleName
+}
 
-# Use the role ARN we just obtained to attach the other policy defined above
-aws iam put-role-policy `
-  --role-name $awsCodeDeployRoleName `
-  --policy-name "codedeploy-${projectName}-apprunner-policy" `
-  --policy-document file://$awsCodeDeployAppRunnerPolicyDocument | Out-Null
+if ($codeDeployRoleExists) {
+  $awsCodeDeployRoleArn = (aws iam get-role --role-name $awsCodeDeployRoleName | ConvertFrom-Json).Role.Arn
+}
 
-# Wait 10 seconds for the role to be propogated across services
-Write-Host " 😴  Sleeping for 10 seconds..."
-Start-Sleep -Seconds 10
+if ($codeDeployRoleExists -and ($Force -or $Delete)) {
+  Write-LogMessage -Icon 🗑️ -Message "Deleting CodeDeploy role '$awsCodeDeployRoleName'..."
+  # Detach managed policies first
+  aws iam detach-role-policy --role-name $awsCodeDeployRoleName --policy-arn "arn:aws:iam::aws:policy/AmazonElasticContainerRegistryPublicFullAccess" 2>$null
+  # Delete inline policies
+  aws iam delete-role-policy --role-name $awsCodeDeployRoleName --policy-name "codedeploy-${projectName}-apprunner-policy" 2>$null
+  aws iam delete-role --role-name $awsCodeDeployRoleName | Out-Null
+  $codeDeployRoleExists = $false
+}
+
+if (-not $codeDeployRoleExists -and -not $Delete) {
+  Write-LogMessage -Icon 🆕 -Message "Creating CodeDeploy role..."
+  $awsCodeDeployRoleArn = aws iam create-role `
+    --role-name $awsCodeDeployRoleName `
+    --assume-role-policy-document file://$awsCodeDeployAssumeRolePolicyDocument | ConvertFrom-Json | Select-Object -ExpandProperty Role | Select-Object -ExpandProperty Arn
+    
+  # Attach managed AWS policies to the CodeDeploy role
+  # (attach-role-policy is idempotent)
+  aws iam attach-role-policy `
+    --role-name $awsCodeDeployRoleName `
+    --policy-arn "arn:aws:iam::aws:policy/AmazonElasticContainerRegistryPublicFullAccess" | Out-Null
+  
+  # Use the role ARN we just obtained to attach the other policy defined above
+  # (put-role-policy is idempotent - it will update if exists)
+  aws iam put-role-policy `
+    --role-name $awsCodeDeployRoleName `
+    --policy-name "codedeploy-${projectName}-apprunner-policy" `
+    --policy-document file://$awsCodeDeployAppRunnerPolicyDocument | Out-Null
+
+  # Wait 10 seconds for the role to be propagated across services (only if newly created)
+  Write-LogMessage -Icon 😴 -Message "Sleeping for 10 seconds..."
+  Start-Sleep -Seconds 10
+}
 
 # Create the CodeDeploy application, which will be executed via a Lambda function
-Write-Host " 🆕  Creating CodeDeploy application..."
-aws deploy create-application `
-  --application-name "${projectName}-deploy" `
-  --compute-platform "Lambda" | Out-Null
+$codeDeployAppName = "${projectName}-deploy"
+
+$codeDeployAppExists = Test-AWSResourceExists -ResourceType "CodeDeploy Application" -ResourceName $codeDeployAppName -CheckCommand {
+  aws deploy get-application --application-name $codeDeployAppName
+}
+
+if ($codeDeployAppExists -and ($Force -or $Delete)) {
+  Write-LogMessage -Icon 🗑️ -Message "Deleting CodeDeploy application '$codeDeployAppName'..."
+  aws deploy delete-application --application-name $codeDeployAppName | Out-Null
+  $codeDeployAppExists = $false
+}
+
+if (-not $codeDeployAppExists -and -not $Delete) {
+  Write-LogMessage -Icon 🆕 -Message "Creating CodeDeploy application..."
+  aws deploy create-application `
+    --application-name $codeDeployAppName `
+    --compute-platform "Lambda" | Out-Null
+}
 
 # Define a deployment group for the CodeDeploy project
+$codeDeployGroupName = "${projectName}-deploy-group"
 $awsCodeBuildDeployStyle = Get-JSON-Path -FileName "codebuild-deploy-style.json" -JSON_In @{
   deploymentType   = "BLUE_GREEN"
   deploymentOption = "WITH_TRAFFIC_CONTROL"
 }
-Write-Host " 🆕  Creating CodeDeploy deployment group..."
-aws deploy create-deployment-group `
-  --application-name "${projectName}-deploy" `
-  --deployment-group-name "${projectName}-deploy-group" `
-  --service-role-arn $awsCodeDeployRoleArn `
-  --deployment-style file://$awsCodeBuildDeployStyle | Out-Null
+
+$codeDeployGroupExists = Test-AWSResourceExists -ResourceType "CodeDeploy Deployment Group" -ResourceName $codeDeployGroupName -CheckCommand {
+  aws deploy get-deployment-group --application-name $codeDeployAppName --deployment-group-name $codeDeployGroupName
+}
+
+if ($codeDeployGroupExists -and ($Force -or $Delete)) {
+  Write-LogMessage -Icon 🗑️ -Message "Deleting CodeDeploy deployment group '$codeDeployGroupName'..."
+  aws deploy delete-deployment-group --application-name $codeDeployAppName --deployment-group-name $codeDeployGroupName | Out-Null
+  $codeDeployGroupExists = $false
+}
+
+if (-not $codeDeployGroupExists -and -not $Delete) {
+  Write-LogMessage -Icon 🆕 -Message "Creating CodeDeploy deployment group..."
+  aws deploy create-deployment-group `
+    --application-name $codeDeployAppName `
+    --deployment-group-name $codeDeployGroupName `
+    --service-role-arn $awsCodeDeployRoleArn `
+    --deployment-style file://$awsCodeBuildDeployStyle | Out-Null
+}
 
 
 
@@ -1014,13 +1367,18 @@ Write-Host "==================================="
 Write-Host "SETTING UP LOCAL REPO"
 Write-Host "==================================="
 
+if (-not $Delete) {
+  Write-LogMessage -Icon 🛠️ -Message "Finalizing local repo..."
+
 # Add GitHub Actions workflow file
 # Ensure the folder structure exists
 $folderPath = ".github/workflows"
 if (-not (Test-Path $folderPath)) {
+  Write-LogMessage -Icon "  🆕" -Message "Creating .github/workflows folder..."
   New-Item -ItemType Directory -Path $folderPath -Force | Out-Null
 }
 
+  Write-LogMessage -Icon "  🆕" -Message "Creating $folderPath/build.yml file..."
 @'
 # This workflow will do a clean installation of node dependencies, cache/restore them, build the source code and run tests across different versions of node
 # For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-nodejs
@@ -1075,6 +1433,7 @@ jobs:
 '@ | Set-Content -Path "$folderPath/build.yml"
 
 # Add buildspec.yml file
+Write-LogMessage -Icon "  🆕" -Message "Creating $folderPath/buildspec.yml file..."
 @'
 version: 0.2
 
@@ -1097,6 +1456,7 @@ phases:
 
 # Add "patch-server.js" script to add a block of code to the generated server.js file 
 # (as part of the NextJS build process) to make sure app has access to secrets in AWS Secrets Manager
+Write-LogMessage -Icon "  🆕" -Message "Creating $folderPath/patch-server.js file..."
 @"
 import fs from "fs";
 import path from "path";
@@ -1140,7 +1500,7 @@ console.log("✅ Patched server.js with AWS Secrets Manager bootstrap code");
 "@ | Set-Content -Path "patch-server.js"
 
 # Create LOCAL .env file (connects to local PostgreSQL instance, for development/testing)
-Write-Host " 🆕  Creating .env file..."
+Write-LogMessage -Icon "  🆕" -Message "Creating .env file..."
 Remove-Item ".env"
 @"
 # Port for the Fastify API to run on
@@ -1164,7 +1524,7 @@ DB_PASS="Super!345Q"
 "@ | Set-Content -Path ".env"
 
 # Create PROD .env file (connects to RDS PostgreSQL instance, for production)
-Write-Host " 🆕  Creating .env.prod file..."
+Write-LogMessage -Icon "  🆕" -Message "Creating .env.prod file..."
 @"
 # Port for the Fastify API to run on
 PORT="3000"
@@ -1185,7 +1545,7 @@ SSL_PEM_KEY="$pemFileName"
 "@ | Set-Content -Path ".env.prod"
 
 # Create 'update-secrets.ps1' file
-Write-Host " 🆕  Creating update-secrets.ps1 file..."
+Write-LogMessage -Icon "  🆕" -Message "Creating update-secrets.ps1 file..."
 $hereStringSecret = @'
 $envFile = ".env.prod"
 $secretID = "{{MY_SECRET}}"
@@ -1251,6 +1611,7 @@ $hereStringSecret = $hereStringSecret.Replace("{{MY_SECRET}}", $secretID)
 $hereStringSecret | Set-Content -Path "update-secrets.ps1"
 
 # Update .gitignore/.dockerignore files
+Write-LogMessage -Icon "  🔄" -Message "Updating .gitignore file..."
 @'
 
 # Terraform
@@ -1258,6 +1619,8 @@ $hereStringSecret | Set-Content -Path "update-secrets.ps1"
 
 .env.prod
 '@ | Add-Content -Path ".gitignore"
+
+Write-LogMessage -Icon "  🔄" -Message "Updating .dockerignore file..."
 @'
 
 # Terraform
@@ -1290,8 +1653,10 @@ $scripts['secrets'] = "pwsh -ExecutionPolicy Bypass -File ./update-secrets.ps1"
 # Reassign modified scripts back to the packageJson object
 $packageJson.scripts = [PSCustomObject]$scripts
 
+Write-LogMessage -Icon "  🔄" -Message "Updating scripts in package.json file..."
 # Convert back to JSON and save
 $packageJson | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $packageJsonPath
+} # End of -not $Delete
 
 
 
@@ -1302,11 +1667,19 @@ Write-Host "==================================="
 Write-Host "PUSHING CODE TO GITHUB"
 Write-Host "==================================="
 
-# Push the code to GitHub, triggering a GitHub actions build
-Write-Host " 🚀  Pushing code to GitHub..."
-git add . | Out-Null
-git commit -m "Initial commit" | Out-Null
-git push -u origin main | Out-Null
+if (-not $Delete) {
+  # Push the code to GitHub, triggering a GitHub actions build
+  Write-LogMessage -Icon 🚀 -Message "Pushing code to GitHub..."
+  git add . | Out-Null
+  git commit -m "Initial commit" | Out-Null
+  # Use force push if reusing an existing repo (local is freshly scaffolded)
+  if ($ghRepoExists) {
+    git push -u origin main --force | Out-Null
+  }
+  else {
+    git push -u origin main | Out-Null
+  }
+}
 
 
 
@@ -1317,18 +1690,27 @@ Write-Host "==================================="
 Write-Host "WAIT FOR APPRUNNER SERVICE"
 Write-Host "==================================="
 
-# Get the Service Operation ID from the creation of our AppRunner service
-# from the earlier AWS Infrastructrue step, so we can determine if the service
-# is up-and-running yet, or if it's still in progress
-$serviceOpId = $serviceOutput.OperationId
+# Only wait if we created a new service (serviceOutput will be set)
+# If reusing an existing service, it's already running
+if ($Delete) {
+  Write-LogMessage -Icon ℹ️ -Message "Deleted existing AppRunner service - skipping wait"
+} elseif ($null -ne $serviceOutput) {
+  # Get the Service Operation ID from the creation of our AppRunner service
+  # from the earlier AWS Infrastructrue step, so we can determine if the service
+  # is up-and-running yet, or if it's still in progress
+  $serviceOpId = $serviceOutput.OperationId
 
-# Wait for the AppRunner Service to be available before opening the project,
-# so the user is able to navigate to the live site immediately upon development
-Wait-ForAWSResource -ResourceName $serviceName -DelaySeconds 60 -Command {
-  $serviceStatus = aws apprunner list-operations --service-arn $serviceARN | ConvertFrom-Json | Select-Object -ExpandProperty OperationSummaryList | Where-Object { $_.Id -eq $serviceOpId } | Select-Object -ExpandProperty Status
-  if ($serviceStatus -ne "SUCCEEDED") {
-    cmd /c exit 20
+  # Wait for the AppRunner Service to be available before opening the project,
+  # so the user is able to navigate to the live site immediately upon development
+  Wait-ForAWSResource -ResourceName $serviceName -DelaySeconds 60 -Command {
+    $serviceStatus = aws apprunner list-operations --service-arn $serviceARN | ConvertFrom-Json | Select-Object -ExpandProperty OperationSummaryList | Where-Object { $_.Id -eq $serviceOpId } | Select-Object -ExpandProperty Status
+    if ($serviceStatus -ne "SUCCEEDED") {
+      cmd /c exit 20
+    }
   }
+}
+else {
+  Write-LogMessage -Icon ℹ️ -Message "Reusing existing AppRunner service - skipping wait"
 }
 
 
@@ -1339,25 +1721,22 @@ Write-Host "==================================="
 Write-Host "OUTPUTS"
 Write-Host "==================================="
 
-# Print any useful outputs from the script for the user to note down or copy elsewhere
-Write-Host ""
-Write-Host "New Project Name : ${projectName}"
-Write-Host "GitHub Repo URL  : https://github.com/nblaisdell2/${projectName}"
-Write-Host "Site URL         : ${serviceURL}"
-Write-Host "Database Endpoint: ${rdsHost}"
+if (-not $Delete) {
+  # Print any useful outputs from the script for the user to note down or copy elsewhere
+  Write-Host ""
+  Write-Host "New Project Name : ${projectName}"
+  Write-Host "GitHub Repo URL  : https://github.com/nblaisdell2/${projectName}"
+  Write-Host "Site URL         : https://${serviceURL}"
+  Write-Host "Database Endpoint: ${rdsHost}"
+  Write-Host ""
+} else {
+  Write-Host ""
+  Write-LogMessage -Icon ✅ -Message "Deletion process completed successfully."
+  Write-Host ""
+}
 
-# Wait for the user to enter any key at this point
-Write-Host ""
-Write-Host "Once the values have been copied/noted, press any key to open project in VS Code..."
-$Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") | Out-Null
-
-
-
-#==========================
-# 11. OPEN PROJECT
-#==========================
-# Lastly, open the current directory (the project directory) in VS Code to start developing!
-code .
+# Return to the projects directory
+Set-Location -Path $projectsPath
 
 # Exit the script successfully
 exit 0
